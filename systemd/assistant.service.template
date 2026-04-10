@@ -1,0 +1,23 @@
+[Unit]
+Description=Personal AI Assistant ({{AGENT_NAME}})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{PROJECT_DIR}}/.venv/bin/python {{PROJECT_DIR}}/main.py --agent-dir {{AGENT_ROOT}}
+WorkingDirectory={{PROJECT_DIR}}
+Environment=AGENT_ROOT={{AGENT_ROOT}}
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=5
+
+Environment=PATH=%h/.local/bin:%h/bin:%h/.bun/bin:%h/.local/share/pnpm:%h/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=%h
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier={{AGENT_NAME}}
+
+[Install]
+WantedBy=default.target

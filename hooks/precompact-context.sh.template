@@ -1,0 +1,20 @@
+#!/bin/bash
+# PreCompact hook: Re-inject critical context that should survive compaction.
+# Only runs for this agent's workspace.
+
+CWD="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+case "$CWD" in
+  *{{AGENT_ROOT}}/workspace*) ;;
+  *) exit 0 ;;
+esac
+
+echo "=== CRITICAL CONTEXT (re-injected after compaction) ==="
+echo ""
+echo "## Active TODO Items"
+grep -E "^\- \[ \]" {{AGENT_ROOT}}/workspace/TODO.md 2>/dev/null || echo "None"
+echo ""
+echo "## Pending Signals"
+ls {{AGENT_ROOT}}/signals/*.json 2>/dev/null | head -5 || echo "None"
+echo ""
+echo "## Reminder: Read CLAUDE.md, USER.md, and HEARTBEAT.md for full context"
+echo "=== END CRITICAL CONTEXT ==="

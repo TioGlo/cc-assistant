@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+
+# Runtime config (contains secrets)
+config.yaml
+.env
+
+# Runtime data
+*.db

@@ -1,0 +1,63 @@
+#!/bin/bash
+# Notification hook: Send permission prompts and idle notifications to Telegram.
+# Reads hook event data from stdin.
+
+# These get filled by install.sh — or set them manually
+BOT_TOKEN="YOUR_BOT_TOKEN"
+OWNER_ID="YOUR_OWNER_ID"
+AGENT_ROOT="{{AGENT_ROOT}}"
+AGENT_NAME="{{AGENT_NAME}}"
+
+PENDING_DIR="$AGENT_ROOT/pending-approvals"
+mkdir -p "$PENDING_DIR"
+
+INPUT=$(cat)
+
+TYPE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('notification_type',''))" 2>/dev/null)
+CWD=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null)
+SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null)
+
+# Identify agent by working directory
+case "$CWD" in
+  *${AGENT_ROOT}/coding*)    AGENT="${AGENT_NAME}-code" ;;
+  *${AGENT_ROOT}/workspace*) AGENT="${AGENT_NAME}" ;;
+  *)                         AGENT="unknown" ;;
+esac
+
+# Only notify for sub-agent sessions, not interactive or orchestrator
+case "$AGENT" in
+  unknown|${AGENT_NAME}) exit 0 ;;
+esac
+
+case "$TYPE" in
+  permission_prompt)
+    TMUX_SESSION="${AGENT_NAME}-code"
+    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      PANE_CONTENT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -20 2>/dev/null)
+      QUESTION=$(echo "$PANE_CONTENT" | grep "Do you want to" | tail -1)
+      COMMAND=$(echo "$PANE_CONTENT" | grep -A1 "Bash command\|command:" | tail -1 | sed 's/^[[:space:]]*//')
+      HAS_PERSISTENT=$(echo "$PANE_CONTENT" | grep -c "don't ask again")
+
+      APPROVAL_ID="approval-$(date +%s)"
+      cat > "$PENDING_DIR/${APPROVAL_ID}.json" <<EOF
+{"id":"$APPROVAL_ID","session":"$TMUX_SESSION","question":"$(echo "$QUESTION" | sed 's/"/\\"/g')","command":"$(echo "$COMMAND" | sed 's/"/\\"/g')","has_persistent":$HAS_PERSISTENT,"timestamp":"$(date -Iseconds)"}
+EOF
+
+      MSG="🔐 *Permission Request*%0AAgent: \`$AGENT\`%0A"
+      [ -n "$COMMAND" ] && MSG+="Command: \`$(echo "$COMMAND" | head -c 200)\`%0A"
+      MSG+="$QUESTION%0A%0A/approve $APPROVAL_ID%0A"
+      [ "$HAS_PERSISTENT" -gt 0 ] && MSG+="/approve_always $APPROVAL_ID%0A"
+      MSG+="/deny $APPROVAL_ID"
+    else
+      MSG="🔐 Permission needed for \`$AGENT\`"
+    fi
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+      -d "chat_id=${OWNER_ID}" -d "text=${MSG}" -d "parse_mode=Markdown" > /dev/null 2>&1 &
+    ;;
+  idle_prompt)
+    MSG="✅ *${AGENT}* finished and is idle"
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+      -d "chat_id=${OWNER_ID}" -d "text=${MSG}" -d "parse_mode=Markdown" > /dev/null 2>&1 &
+    ;;
+esac
+exit 0
