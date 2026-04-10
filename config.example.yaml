@@ -43,6 +43,18 @@ claude:
 #       enabled: true
 #       requireMention: false
 
+# Claude Code tmux agents for task delegation
+# The first agent is the default target for DELEGATE blocks
+cc_agents:
+  - name: "code"              # Friendly name
+    tmux_session: "code"      # tmux session name (defaults to name)
+    # working_dir: ""         # defaults to {AGENT_ROOT}/coding
+    # permission_mode: "dangerously-skip-permissions"  # default
+  # Additional agents:
+  # - name: "research"
+  #   tmux_session: "research"
+  #   working_dir: "~/.assistant/research"
+
 scheduler:
   # Pre-configured recurring jobs
   jobs: []

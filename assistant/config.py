@@ -22,6 +22,18 @@ class ClaudeConfig:
 
 
 @dataclass
+class CCAgent:
+    name: str
+    tmux_session: str = ""  # defaults to name if empty
+    working_dir: str = ""   # defaults to {AGENT_ROOT}/coding if empty
+    permission_mode: str = "dangerously-skip-permissions"
+
+    def __post_init__(self):
+        if not self.tmux_session:
+            self.tmux_session = self.name
+
+
+@dataclass
 class ScheduledJob:
     name: str
     prompt: str
@@ -50,6 +62,12 @@ class Config:
     claude: ClaudeConfig
     scheduler: SchedulerConfig
     slack: SlackConfig
+    cc_agents: list[CCAgent] = field(default_factory=list)
+
+    @property
+    def default_agent(self) -> CCAgent | None:
+        """First agent in the list is the default dispatch target."""
+        return self.cc_agents[0] if self.cc_agents else None
 
 
 def load_config(path: str | Path) -> Config:
@@ -62,9 +80,14 @@ def load_config(path: str | Path) -> Config:
 
     sched_raw = raw.get("scheduler", {})
     jobs_raw = sched_raw.pop("jobs", [])
+    sched_raw.pop("db_path", None)  # legacy field, ignored
     jobs = [ScheduledJob(**j) for j in jobs_raw]
     scheduler = SchedulerConfig(jobs=jobs)
 
     slack = SlackConfig(**raw.get("slack", {}))
 
-    return Config(telegram=telegram, claude=claude, scheduler=scheduler, slack=slack)
+    agents_raw = raw.get("cc_agents", [])
+    cc_agents = [CCAgent(**a) for a in agents_raw]
+
+    return Config(telegram=telegram, claude=claude, scheduler=scheduler,
+                  slack=slack, cc_agents=cc_agents)

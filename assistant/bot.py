@@ -40,7 +40,7 @@ class AssistantBot:
         self.bridge = bridge
         self.session_manager = session_manager
         self.scheduler = scheduler
-        self.tmux = TmuxDispatch()
+        self.tmux = TmuxDispatch(config.cc_agents or None)
         self._start_time = time.time()
         self.app: Application | None = None
 
@@ -65,10 +65,10 @@ class AssistantBot:
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
-            session = cmd.session or self.tmux.session
-            logger.info("Cron job delegating task to %s: %s", session, cmd.task[:80])
+            session = cmd.session or None  # None = use default agent
+            logger.info("Cron job delegating task: %s", cmd.task[:80])
             try:
-                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout)
+                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout, session=session)
                 await self._send_text(self.config.telegram.owner_id, f"Delegated: {status}")
             except Exception as e:
                 logger.exception("Cron delegation failed")
@@ -116,7 +116,7 @@ class AssistantBot:
             f"Model: {self.config.claude.model}",
             f"Session: {session_id or 'none (will start fresh)'}",
             f"Scheduled jobs: {len(jobs)}",
-            f"Tmux session: {self.tmux.session}",
+            f"Tmux session: {self.tmux.default_session_name}",
         ]
         await update.message.reply_text("\n".join(lines))
 
@@ -255,7 +255,7 @@ class AssistantBot:
             await update.message.reply_text(
                 "Usage: /code <task description>\n\n"
                 "Dispatches to a full interactive Claude Code session.\n"
-                f"Tmux session: {self.tmux.session}"
+                f"Tmux session: {self.tmux.default_session_name}"
             )
             return
         task = " ".join(context.args)
@@ -269,13 +269,13 @@ class AssistantBot:
     async def cmd_codecheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return
-        if not await self.tmux.session_exists():
+        if not await self.tmux.default_session_name_exists():
             await update.message.reply_text(
-                f"No tmux session '{self.tmux.session}'. It will be created on next /code dispatch."
+                f"No tmux session '{self.tmux.default_session_name}'. It will be created on next /code dispatch."
             )
             return
         output = await self.tmux.capture_recent_output(lines=30)
-        msg = f"Session: {self.tmux.session}\n\nRecent output:\n{output}"
+        msg = f"Session: {self.tmux.default_session_name}\n\nRecent output:\n{output}"
         for chunk in split_message(msg):
             await update.message.reply_text(chunk)
 
@@ -322,10 +322,10 @@ class AssistantBot:
 
     async def _process_delegations(self, text: str, update: Update) -> None:
         for cmd in extract_delegate_commands(text):
-            session = cmd.session or self.tmux.session
-            logger.info("Delegating task to %s: %s", session, cmd.task[:80])
+            session = cmd.session or None  # None = use default agent
+            logger.info("Delegating task: %s", cmd.task[:80])
             try:
-                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout)
+                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout, session=session)
                 await update.message.reply_text(status)
             except Exception as e:
                 logger.exception("Delegation failed")
