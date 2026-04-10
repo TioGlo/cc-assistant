@@ -1,8 +1,17 @@
 # cc-assistant
 
-Personal AI assistant powered by Claude Code. Message your agent from Telegram, and it can do real work — files, shell, web, browser automation, scheduled tasks, and delegation to full interactive Claude Code instances.
+Personal AI assistant powered by Claude Code. Message your agent from Telegram, and it can do real work — files, shell, web, browser automation, scheduled tasks, and delegation to full interactive Claude Code instances with teams and subagents.
 
 Built as an open-source alternative to OpenClaw for Claude Code Max plan users.
+
+## Prerequisites
+
+- **Linux** with systemd (Ubuntu 22.04+, Fedora 39+, Arch, etc.)
+- **Python 3.13+** with [uv](https://docs.astral.sh/uv/) for dependency management
+- **[Claude Code CLI](https://claude.ai/code)** installed and authenticated (`claude auth login`)
+- **tmux** for interactive Claude Code sessions
+- **A Telegram bot** — create one via [@BotFather](https://t.me/BotFather)
+- **Your Telegram user ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
 ## Quick Start
 
@@ -14,7 +23,9 @@ cd cc-assistant
 systemctl --user start assistant
 ```
 
-## Custom Agent
+Your bot should respond to `/start` on Telegram.
+
+## Custom Agent Directory
 
 Deploy a named agent with its own identity and workspace:
 
@@ -24,33 +35,102 @@ Deploy a named agent with its own identity and workspace:
 systemctl --user start luci
 ```
 
-## Multiple Agents
+Each agent gets its own config, workspace, sessions, and systemd service.
 
-Run as many agents as you want on one machine. Each gets its own:
-- Config, workspace, and session
-- Telegram bot (create one per agent via @BotFather)
-- Systemd service (named after the agent directory)
-- Tmux coding session (auto-created on first `/code` dispatch)
+## Multiple Agents on One Machine
 
 ```bash
-./install.sh --agent-dir ~/.qu       # systemctl --user start qu
-./install.sh --agent-dir ~/.luci     # systemctl --user start luci
-./install.sh --agent-dir ~/.cybin    # systemctl --user start cybin
+./install.sh                        # ~/.assistant → service: assistant
+./install.sh --agent-dir ~/.luci    # ~/.luci     → service: luci
+./install.sh --agent-dir ~/.cybin   # ~/.cybin    → service: cybin
 ```
+
+Each agent needs its own Telegram bot (create via @BotFather).
 
 ## Architecture
 
 ```
-Telegram → Bot Gateway → Claude Code CLI (claude -p)
-                ↕                    ↕
-           Scheduler            Tmux Dispatch
-          (cron jobs)        (full Claude Code)
-                ↕
-         Slack Monitor
-        (optional)
+Telegram Bot
+      │
+      ▼
+Bot Gateway (Python) ──── Claude Code CLI (claude -p)
+      │                         │
+      ├── Scheduler        Workspace CLAUDE.md
+      │   (cron jobs)      (agent identity)
+      │
+      ├── Tmux Dispatch ──── Claude Code (interactive)
+      │   (fire & forget)     ├── Teams
+      │                       ├── Subagents
+      │                       └── Browser MCP
+      │
+      └── Slack Monitor
+          (optional)
 ```
 
-The bot is a thin gateway. Each message goes to `claude -p` which runs in the agent's workspace where `CLAUDE.md` defines the agent's identity. Heavy tasks get delegated to a tmux Claude Code instance with full interactive capabilities (teams, subagents, worktrees).
+The bot is a thin gateway. Each Telegram message goes to `claude -p` which runs in the agent's workspace where `CLAUDE.md` defines its identity. Heavy tasks get delegated to tmux Claude Code instances with full interactive capabilities.
+
+## Configuration
+
+### config.yaml
+
+```yaml
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  owner_id: 123456789
+
+claude:
+  model: "opus"                     # or sonnet, haiku
+  permission_mode: "bypassPermissions"
+  system_prompt: |
+    You are a personal AI assistant accessible via Telegram.
+    # ... see config.example.yaml for full template
+  max_turns: 50
+  timeout: 300
+  mcp_config: "/path/to/mcp.json"  # optional MCP server config
+
+# Claude Code tmux agents for task delegation
+cc_agents:
+  - name: "my-code"
+    tmux_session: "my-code"
+    # working_dir: ""              # defaults to {AGENT_ROOT}/coding
+    # permission_mode: "dangerously-skip-permissions"
+
+# Scheduled jobs
+scheduler:
+  jobs:
+    - name: "heartbeat"
+      prompt: "Read HEARTBEAT.md and follow its instructions."
+      cron: "25 */2 * * *"
+
+# Optional Slack monitoring
+# slack:
+#   enabled: true
+#   bot_token: "xoxb-..."
+#   app_token: "xapp-..."
+#   channels:
+#     "#general": { enabled: true, requireMention: false }
+```
+
+### cc_agents
+
+Define one or more tmux Claude Code sessions. The first is the default delegation target.
+
+```yaml
+cc_agents:
+  - name: "code"                    # general coding
+    tmux_session: "code"
+  - name: "research"                # long-running research
+    tmux_session: "research"
+    working_dir: "~/.myagent/research"
+    permission_mode: "auto"         # when auto-mode bug is fixed
+```
+
+Agents are auto-created on first `/code` dispatch. Or start manually:
+
+```bash
+tmux new-session -s my-code -c ~/.assistant/coding
+claude --dangerously-skip-permissions
+```
 
 ## Core Commands
 
@@ -58,15 +138,29 @@ The bot is a thin gateway. Each message goes to `claude -p` which runs in the ag
 |---------|-------------|
 | `/start` | Show help |
 | `/reset` | Clear conversation session |
-| `/status` | Agent info, uptime, session |
+| `/status` | Agent info, uptime, tmux session |
 | `/jobs` | List scheduled jobs |
 | `/schedule <cron> <prompt>` | Add a recurring job |
-| `/remind <delay> <prompt>` | One-shot reminder |
+| `/remind <delay> <prompt>` | One-shot reminder (e.g. `/remind 2h check deploy`) |
 | `/cancel <name>` | Remove a scheduled job |
 | `/code <task>` | Dispatch to full Claude Code |
-| `/codecheck` | Check coding session status |
-| `/approve <id>` | Approve a permission request |
+| `/codecheck` | Check coding session output |
+| `/approve <id>` | Approve a tmux permission request |
+| `/approve_always <id>` | Approve with "don't ask again" |
 | `/deny <id>` | Deny a permission request |
+
+## Self-Delegation
+
+The agent can self-delegate heavy tasks by emitting structured blocks in its responses:
+
+```
+<!--DELEGATE:{"task":"detailed description","timeout":600}-->
+<!--DELEGATE:{"task":"research AI trends","timeout":900,"session":"research"}-->
+<!--SCHEDULE:{"name":"daily-check","prompt":"check the deploy","cron":"0 9 * * *"}-->
+<!--REMIND:{"prompt":"follow up on email","delay":"2h"}-->
+```
+
+The bot parses these and acts on them — dispatching to tmux, registering cron jobs, or setting reminders.
 
 ## Modules
 
@@ -75,11 +169,13 @@ Add custom Telegram commands and cron jobs by creating modules in `{AGENT_ROOT}/
 ```
 modules/
   my-feature/
-    telegram.py     # Register Telegram commands
-    cron.py         # Register scheduled jobs
-    prompts/        # Prompt files (convention)
-    data/           # Module data (convention)
+    telegram.py     # present? → registers Telegram commands
+    cron.py         # present? → registers scheduled jobs
+    prompts/        # convention (not auto-loaded)
+    data/           # convention (not auto-loaded)
 ```
+
+No manifest needed. File presence is the declaration.
 
 ### telegram.py
 
@@ -96,56 +192,147 @@ def register(bot):
 
 ```python
 def register(scheduler):
-    scheduler.add_cron_job(
-        "my-job", "Do something useful", "0 9 * * *"
-    )
+    scheduler.add_cron_job("my-task", "Do something useful", "0 9 * * *")
 ```
 
-## Delegation
+## Recommended Setup
 
-The agent can self-delegate heavy tasks by emitting structured blocks:
+### Workspace Files
 
+After installation, customize these files in `{AGENT_ROOT}/workspace/`:
+
+| File | Purpose |
+|------|---------|
+| `CLAUDE.md` | Agent identity, operating principles, capabilities |
+| `USER.md` | Who you are, your preferences, what you want from the agent |
+| `HEARTBEAT.md` | Periodic check-in checklist (system health, TODO items) |
+| `TODO.md` | Living scratchpad for pending items |
+
+### MCP Servers
+
+We recommend these MCP servers. Configure globally in `~/.claude.json` or per-project in `.mcp.json`:
+
+**Global (all sessions):**
+
+| Server | Purpose | Install |
+|--------|---------|---------|
+| [qmd](https://github.com/tobi/qmd) | Session history search, workspace search | `bun install -g @tobilu/qmd` |
+| [context7](https://github.com/upstash/context7) | Library/framework documentation lookup | Auto via npx |
+
+**Agent-specific (in `{AGENT_ROOT}/coding/.mcp.json`):**
+
+| Server | Purpose | When needed |
+|--------|---------|-------------|
+| [browser-mcp](https://github.com/anthropics/browser-mcp) | Browser automation via persistent Chrome | Social media, web scraping, form filling |
+| [google-workspace](https://github.com/taylorwilsdon/google_workspace_mcp) | Gmail, Calendar, Drive | Email triage, calendar management |
+| comfyui-mcp | AI image generation | Content creation pipelines |
+
+**Browser automation** requires Chrome running with remote debugging:
+
+```bash
+google-chrome --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.assistant/chrome-profile" \
+  --no-first-run --no-default-browser-check
 ```
-<!--DELEGATE:{"task":"build a REST API","timeout":600}-->
+
+Sessions persist in the Chrome profile. Log into sites once manually, and the agent can automate from there.
+
+### Claude Code Subagents
+
+Define specialized subagents in `~/.claude/agents/` for cheaper, focused task execution:
+
+```markdown
+---
+name: email-triager
+description: Triage Gmail inbox
+model: sonnet
+tools: [Read, Write, Bash, Grep, Glob]
+mcpServers: [google-workspace]
+maxTurns: 30
+---
+Read the email triage prompt and follow its instructions.
 ```
 
-This dispatches to a full interactive Claude Code in tmux, which can use teams, subagents, and worktrees. Results are delivered back to Telegram.
+Cron jobs can invoke subagents instead of using full Opus sessions:
 
-## Hooks
+```yaml
+- name: "email-triage"
+  prompt: "Use the @email-triager subagent to triage the inbox."
+  cron: "0 9,14,19 * * *"
+```
+
+### Hooks
 
 Template hooks are installed to `{AGENT_ROOT}/hooks/`:
 
-- **precompact-context.sh** — Re-injects TODO and critical context when Claude's session is compressed
-- **notify-telegram.sh** — Sends permission prompts and idle notifications to Telegram
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `precompact-context.sh` | PreCompact | Re-injects TODO items and critical context when session is compressed |
+| `notify-telegram.sh` | Notification | Sends permission prompts and idle notifications to Telegram |
 
-Configure in `~/.claude/settings.json` under the `hooks` section.
+Register in `~/.claude/settings.json`:
 
-## Files
+```json
+{
+  "hooks": {
+    "PreCompact": [{"hooks": [{"type": "command", "command": "/path/to/precompact-context.sh"}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "/path/to/notify-telegram.sh"}]}]
+  }
+}
+```
+
+The notification hook enables **remote approval** — when a tmux agent hits a permission wall, you get a Telegram message with `/approve` and `/deny` commands.
+
+### qmd Setup
+
+[qmd](https://github.com/tobi/qmd) indexes your workspace and session transcripts for fast search:
+
+```bash
+# Install
+bun install -g @tobilu/qmd
+
+# Index your workspace
+qmd collection add ~/.assistant/workspace --name assistant-workspace --mask "**/*.md"
+qmd embed
+
+# Add to Claude Code as MCP server
+claude mcp add -s user qmd -- /path/to/qmd-mcp
+```
+
+Add a qmd-sessions hook to auto-index session transcripts on PreCompact and SessionEnd. See [qmd-sessions skill](https://github.com/tobi/qmd) for details.
+
+## File Structure
 
 ```
 {AGENT_ROOT}/
-├── config.yaml          # Bot token, model, scheduler jobs
+├── config.yaml            # Bot token, model, agents, scheduler jobs
 ├── workspace/
-│   ├── CLAUDE.md        # Agent identity and instructions
-│   ├── USER.md          # User profile
-│   ├── HEARTBEAT.md     # Periodic check-in checklist
-│   └── TODO.md          # Living scratchpad
-├── modules/             # Custom modules
-├── signals/             # Task completion signals
-├── coding/              # Tmux Claude working directory
-├── hooks/               # Notification and lifecycle hooks
-├── pending-approvals/   # Permission approval queue
-├── session.json         # Persistent session ID
-└── scheduler-jobs.json  # Dynamically-added cron jobs
+│   ├── CLAUDE.md          # Agent identity and instructions
+│   ├── USER.md            # User profile
+│   ├── HEARTBEAT.md       # Periodic check-in checklist
+│   ├── TODO.md            # Living scratchpad
+│   ├── skills/            # Claude Code skills (SKILL.md convention)
+│   ├── prompts/           # Task-specific prompt files
+│   └── tasks/             # Dispatched task specs (auto-generated)
+├── modules/               # Custom Telegram commands and cron jobs
+├── coding/                # Tmux Claude working directory
+├── signals/               # Task completion signals
+├── hooks/                 # Notification and lifecycle hooks
+├── pending-approvals/     # Permission approval queue
+├── chrome-profile/        # Persistent Chrome browser data (optional)
+├── session.json           # Persistent conversation session ID
+└── scheduler-jobs.json    # Dynamically-added cron jobs
 ```
 
-## Requirements
+## How It Works
 
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/) for dependency management
-- [Claude Code](https://claude.ai/code) CLI installed and authenticated
-- Linux with systemd (for service management)
-- tmux (for interactive Claude Code sessions)
+1. **Telegram message** → Bot receives it, sends to `claude -p` with session resumption
+2. **Claude responds** → Bot parses SCHEDULE/REMIND/DELEGATE blocks, strips them, sends clean text to Telegram
+3. **DELEGATE block** → Bot dispatches task to a tmux Claude Code session, notifies on completion
+4. **Cron job fires** → Bot runs `claude -p` with the prompt, processes response same as above
+5. **Permission needed** → Notification hook sends Telegram message, user approves/denies remotely
+6. **Session compressed** → PreCompact hook re-injects critical context (TODO, pending tasks)
+7. **Heartbeat** → Periodic check-in runs subagent, reports status, handles pending items
 
 ## License
 
