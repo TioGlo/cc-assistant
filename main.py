@@ -44,6 +44,8 @@ def main() -> None:
 
     # Ensure directories exist
     paths.workspace().mkdir(parents=True, exist_ok=True)
+    (paths.workspace() / "projects").mkdir(parents=True, exist_ok=True)
+    (paths.workspace() / "areas").mkdir(parents=True, exist_ok=True)
     paths.signals_dir().mkdir(parents=True, exist_ok=True)
     paths.pending_approvals_dir().mkdir(parents=True, exist_ok=True)
     paths.modules_dir().mkdir(parents=True, exist_ok=True)

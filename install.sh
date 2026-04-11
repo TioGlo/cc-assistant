@@ -36,6 +36,8 @@ echo ""
 # 1. Create directory structure
 echo "[1/6] Creating directory structure..."
 mkdir -p "$AGENT_ROOT/workspace"
+mkdir -p "$AGENT_ROOT/workspace/projects"
+mkdir -p "$AGENT_ROOT/workspace/areas"
 mkdir -p "$AGENT_ROOT/signals"
 mkdir -p "$AGENT_ROOT/coding"
 mkdir -p "$AGENT_ROOT/modules"
@@ -63,6 +65,22 @@ for f in CLAUDE.md USER.md HEARTBEAT.md TODO.md; do
 
 Define your agent's identity, operating principles, and capabilities here.
 This file is loaded automatically for every claude -p session from this workspace.
+
+## Workspace Structure
+
+- `CLAUDE.md` — This file. Your identity and operating instructions.
+- `USER.md` — Profile of the user you support.
+- `HEARTBEAT.md` — Periodic check-in checklist.
+- `TODO.md` — Living scratchpad for pending items.
+- `projects/` — Active work with end states. Each project has `summary.md` + `items.md`.
+- `areas/` — Ongoing life domains. Each area has `summary.md` + `items.md`.
+
+## Projects & Areas
+
+You use a simplified PARA system. Before acting on a task, check if it relates
+to an active project or area. If it does, read the `summary.md` first —
+the summaries are inputs to your work, not passive logs. After acting, update
+the summary if state changed, and add a timestamped line to items.md.
 TMPL
                 ;;
             USER.md)
@@ -76,16 +94,26 @@ TMPL
                 cat > "$target" <<'TMPL'
 # Heartbeat
 
-Define what to check on each periodic heartbeat. Work through sections in order.
+Define what to check on each periodic heartbeat. Work through sections in order. If something needs action, handle it or delegate it. Keep responses brief.
 
-## 1. Pending Tasks
-- Check for any pending signals or incomplete work
+## 1. Projects & Areas (strategic check — first, not last)
 
-## 2. System Health
+- `ls workspace/projects/` — list active projects
+- For each project, glance at `summary.md` — is the status still accurate?
+- If a project shows a blocker you can act on, do it or delegate it
+- Areas are more passive — check when something in recent activity relates to one
+- Before finishing: if you took action on a project, update its `summary.md` and add a line to `items.md`
+
+## 2. Pending Tasks
+- Check for any pending signals or incomplete work in signals/
+- Check tmux sessions are alive
+
+## 3. System Health
 - Verify services are running
 
-## 3. TODO List
+## 4. TODO List
 - Check TODO.md for pending items
+- If a TODO has grown into something bigger, promote it to a project folder
 TMPL
                 ;;
             TODO.md)
@@ -142,13 +170,19 @@ echo "=== Install complete ==="
 echo ""
 echo "Directory structure:"
 echo "  $AGENT_ROOT/"
-echo "  ├── config.yaml        # Edit with your Telegram bot token + owner ID"
-echo "  ├── workspace/         # Agent workspace (CLAUDE.md, USER.md, etc.)"
-echo "  ├── modules/           # Custom modules (telegram.py, cron.py per module)"
-echo "  ├── signals/           # Task completion signals"
-echo "  ├── coding/            # Tmux Claude working directory"
-echo "  ├── hooks/             # Notification and lifecycle hooks"
-echo "  └── pending-approvals/ # Tmux permission approval queue"
+echo "  ├── config.yaml            # Edit with your Telegram bot token + owner ID"
+echo "  ├── workspace/             # Agent workspace"
+echo "  │   ├── CLAUDE.md          # Agent identity"
+echo "  │   ├── USER.md            # User profile"
+echo "  │   ├── HEARTBEAT.md       # Periodic check-in checklist"
+echo "  │   ├── TODO.md            # Living scratchpad"
+echo "  │   ├── projects/          # Active work with end states"
+echo "  │   └── areas/             # Ongoing life domains"
+echo "  ├── modules/               # Custom modules (telegram.py, cron.py per module)"
+echo "  ├── signals/               # Task completion signals"
+echo "  ├── coding/                # Tmux Claude working directory"
+echo "  ├── hooks/                 # Notification and lifecycle hooks"
+echo "  └── pending-approvals/     # Tmux permission approval queue"
 echo ""
 echo "Commands:"
 echo "  systemctl --user start $SERVICE_NAME"
