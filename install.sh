@@ -132,6 +132,62 @@ TMPL
     fi
 done
 
+# 3b. Seed the onboarding project
+ONBOARDING_DIR="$AGENT_ROOT/workspace/projects/onboarding"
+if [ ! -d "$ONBOARDING_DIR" ]; then
+    mkdir -p "$ONBOARDING_DIR"
+    cat > "$ONBOARDING_DIR/summary.md" <<'TMPL'
+# Project: Onboarding
+
+**Goal:** Establish a productive working relationship with the user. Learn who they are, what they want support with, and how they want you to show up.
+
+**Status:** Active — this is your first project. Work it honestly.
+
+**End state:** You know the user well enough to support them effectively. At least one real project or area has been created with the user's input. A reliable check-in rhythm is established.
+
+## What onboarding actually involves
+
+1. **Read all workspace files thoroughly** — CLAUDE.md, USER.md, HEARTBEAT.md, TODO.md. These are your starting context.
+
+2. **Introduce yourself on first interaction** — briefly. Tell the user what you understand about your role, and ask them what's missing.
+
+3. **Ask to learn, not to interrogate** — Discover what the user is working on, what's hard for them, what they want help with. Don't demand a full questionnaire. Learn across conversations.
+
+4. **Document learnings** — As you learn things about the user, write them to `items.md` in this project, and eventually promote durable facts into USER.md itself.
+
+5. **Help identify first real projects and areas** — When something recurring or substantial comes up, ask if it should become a project or area. Create the folders together.
+
+6. **Establish a check-in rhythm** — Figure out how often the user wants you to check in. Daily? On-demand? Heartbeat-driven? Respect their answer.
+
+7. **Mark onboarding complete when you reach steady state** — You have context, you have projects, you have rhythm. At that point, update this summary to "Complete" and the onboarding project can be removed or archived.
+
+## Working principles during onboarding
+
+- **Curiosity over efficiency** — This is the one time where asking questions is the primary work.
+- **Don't assume you know the user** — Even if USER.md is detailed, ask to confirm what matters most right now.
+- **Write things down immediately** — If the user mentions a goal, a constraint, a preference — capture it in items.md before the conversation ends.
+- **Small commitments, kept** — Don't offer to do everything. Offer one thing, do it well.
+
+## Why this project exists as a template
+
+New agents have no context about their users. Without an explicit onboarding project, the agent either:
+- Tries to act without enough context (and fails)
+- Waits passively for instructions (and feels like a tool, not a partner)
+
+By making onboarding a project with a clear goal and end state, the agent has something concrete to work on from day one — and a clear signal when it has become integrated enough to shift focus to ongoing work.
+TMPL
+
+    cat > "$ONBOARDING_DIR/items.md" <<'TMPL'
+# Onboarding — Items
+
+Learnings about the user, captured as you discover them. Once this list gets
+substantial, promote the durable facts into USER.md.
+
+- (Nothing yet. Start here.)
+TMPL
+    echo "  Created $ONBOARDING_DIR/"
+fi
+
 # 4. Copy hook templates
 echo "[4/6] Setting up hooks..."
 for template in "$SCRIPT_DIR"/hooks/*.template; do
