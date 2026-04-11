@@ -65,14 +65,37 @@ class AssistantBot:
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
-            session = cmd.session or None  # None = use default agent
+            session = cmd.session or None
+            task = self._enrich_with_project(cmd.task, cmd.project)
             logger.info("Cron job delegating task: %s", cmd.task[:80])
             try:
-                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout, session=session)
+                status = await self.tmux.dispatch(task, timeout=cmd.timeout, session=session)
                 await self._send_text(self.config.telegram.owner_id, f"Delegated: {status}")
             except Exception as e:
                 logger.exception("Cron delegation failed")
                 await self._send_text(self.config.telegram.owner_id, f"Delegation failed: {e}")
+
+    def _enrich_with_project(self, task: str, project: str) -> str:
+        """If a project name is given, prepend its summary to the task description."""
+        if not project:
+            return task
+        summary_path = paths.workspace() / "projects" / project / "summary.md"
+        if not summary_path.exists():
+            logger.warning("Project summary not found: %s", project)
+            return task
+        try:
+            summary = summary_path.read_text()
+            return (
+                f"# Project Context: {project}\n\n"
+                f"{summary}\n\n"
+                f"---\n\n"
+                f"# Task\n\n"
+                f"{task}\n\n"
+                f"---\n\n"
+                f"After completing the task, update {summary_path} if the project state changed."
+            )
+        except OSError:
+            return task
 
     # -- Core commands --
 
@@ -110,12 +133,21 @@ class AssistantBot:
         minutes, seconds = divmod(remainder, 60)
         session_id = self.session_manager.get_session_id("chat")
         jobs = self.scheduler.list_jobs()
+
+        # Count active projects and areas
+        projects_dir = paths.workspace() / "projects"
+        areas_dir = paths.workspace() / "areas"
+        project_count = sum(1 for p in projects_dir.iterdir() if p.is_dir()) if projects_dir.exists() else 0
+        area_count = sum(1 for a in areas_dir.iterdir() if a.is_dir()) if areas_dir.exists() else 0
+
         lines = [
             f"Agent: {paths.agent_name()}",
             f"Uptime: {hours}h {minutes}m {seconds}s",
             f"Model: {self.config.claude.model}",
             f"Session: {session_id or 'none (will start fresh)'}",
             f"Scheduled jobs: {len(jobs)}",
+            f"Active projects: {project_count}",
+            f"Areas: {area_count}",
             f"Tmux session: {self.tmux.default_session_name}",
         ]
         await update.message.reply_text("\n".join(lines))
@@ -322,10 +354,11 @@ class AssistantBot:
 
     async def _process_delegations(self, text: str, update: Update) -> None:
         for cmd in extract_delegate_commands(text):
-            session = cmd.session or None  # None = use default agent
+            session = cmd.session or None
+            task = self._enrich_with_project(cmd.task, cmd.project)
             logger.info("Delegating task: %s", cmd.task[:80])
             try:
-                status = await self.tmux.dispatch(cmd.task, timeout=cmd.timeout, session=session)
+                status = await self.tmux.dispatch(task, timeout=cmd.timeout, session=session)
                 await update.message.reply_text(status)
             except Exception as e:
                 logger.exception("Delegation failed")

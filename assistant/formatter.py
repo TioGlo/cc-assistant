@@ -28,6 +28,7 @@ class DelegateCommand:
     task: str
     timeout: int = 600
     session: str = ""  # empty = use default tmux session
+    project: str = ""  # optional project name to inject summary context
 
 
 def split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
@@ -87,6 +88,7 @@ def extract_delegate_commands(text: str) -> list[DelegateCommand]:
             commands.append(DelegateCommand(
                 task=data["task"], timeout=data.get("timeout", 600),
                 session=data.get("session", ""),
+                project=data.get("project", ""),
             ))
         except (json.JSONDecodeError, KeyError):
             pass
