@@ -143,7 +143,7 @@ if [ ! -d "$ONBOARDING_DIR" ]; then
 
 **Status:** Active — this is your first project. Work it honestly.
 
-**End state:** You know the user well enough to support them effectively. At least one real project or area has been created with the user's input. A reliable check-in rhythm is established.
+**End state:** You know the user well enough to support them effectively. At least one real project AND at least one area have been created with the user's input. A reliable check-in rhythm is established.
 
 ## What onboarding actually involves
 
@@ -156,6 +156,21 @@ if [ ! -d "$ONBOARDING_DIR" ]; then
 4. **Document learnings** — As you learn things about the user, write them to `items.md` in this project, and eventually promote durable facts into USER.md itself.
 
 5. **Help identify first real projects and areas** — When something recurring or substantial comes up, ask if it should become a project or area. Create the folders together.
+
+   **Projects are easier to spot** — they have a goal and end state ("build X", "complete Y course", "launch Z"). Don't let the agent's bias toward concrete projects cause areas to be neglected.
+
+   **Areas need proactive discovery.** An area is an ongoing life domain with no end state. Every user has several. During onboarding, actively look for patterns that suggest areas exist and should be created:
+
+   - **Work/profession** — how the user earns a living, even if it's complicated or in transition
+   - **Health & self-care** — physical, mental, emotional well-being
+   - **A creative or learning pursuit** — something they're developing over time
+   - **Important relationships** — family, partners, close friends, chosen community
+   - **Home & environment** — living space, possessions, systems that need maintenance
+   - **Financial life** — income streams, bills, savings, debts
+
+   These aren't universal — different users have different areas. The point is to recognize the patterns when they surface. If the user mentions something in passing that clearly fits one of these domains, propose creating the area and write its first summary together.
+
+   **Create at least one area during onboarding.** The first area is the hardest to create — once one exists, the pattern becomes obvious. Aim to establish one before onboarding completes.
 
 6. **Establish a check-in rhythm** — Figure out how often the user wants you to check in. Daily? On-demand? Heartbeat-driven? Respect their answer.
 
