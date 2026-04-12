@@ -5,24 +5,44 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Parse arguments
 AGENT_ROOT="$HOME/.assistant"
+TEMPLATE="assistant"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --agent-dir) AGENT_ROOT="$2"; shift 2 ;;
+        --template)  TEMPLATE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: install.sh [--agent-dir <path>]"
+            echo "Usage: install.sh [--agent-dir <path>] [--template <name>]"
             echo ""
             echo "Install a personal AI assistant powered by Claude Code."
             echo ""
             echo "Options:"
-            echo "  --agent-dir <path>  Agent root directory (default: ~/.assistant)"
+            echo "  --agent-dir <path>   Agent root directory (default: ~/.assistant)"
+            echo "  --template <name>    Starting template (default: assistant)"
+            echo ""
+            echo "Templates:"
+            echo "  assistant   Ready-to-serve personal assistant. Practical, structured,"
+            echo "              workspace pre-explained. Good for users who want a capable"
+            echo "              agent immediately."
+            echo ""
+            echo "  curious     Discovery-driven agent. Boots with questions, not answers."
+            echo "              Builds its identity through interaction. Good for autonomous"
+            echo "              agents or users who want a deeper working relationship."
             echo ""
             echo "Examples:"
-            echo "  ./install.sh                        # Default agent at ~/.assistant"
-            echo "  ./install.sh --agent-dir ~/.luci     # Custom agent named 'luci'"
+            echo "  ./install.sh                                    # Default assistant"
+            echo "  ./install.sh --agent-dir ~/.luci --template curious"
             exit 0 ;;
         *) echo "Unknown argument: $1. Use --help for usage."; exit 1 ;;
     esac
 done
+
+# Validate template
+TEMPLATE_DIR="$SCRIPT_DIR/templates/$TEMPLATE"
+if [ ! -d "$TEMPLATE_DIR" ]; then
+    echo "Unknown template: $TEMPLATE"
+    echo "Available templates: $(ls "$SCRIPT_DIR/templates/" | grep -v shared | tr '\n' ' ')"
+    exit 1
+fi
 
 # Derive names
 AGENT_NAME="$(basename "$AGENT_ROOT" | sed 's/^\.//')"
@@ -30,6 +50,7 @@ SERVICE_NAME="$AGENT_NAME"
 
 echo "=== ${AGENT_NAME} Install ==="
 echo "Agent root: $AGENT_ROOT"
+echo "Template: $TEMPLATE"
 echo "Service: $SERVICE_NAME"
 echo ""
 
@@ -55,39 +76,29 @@ fi
 
 # 3. Seed workspace templates (don't overwrite existing)
 echo "[3/6] Seeding workspace templates..."
-for f in CLAUDE.md USER.md HEARTBEAT.md TODO.md; do
+
+# Copy CLAUDE.md from selected template
+if [ ! -f "$AGENT_ROOT/workspace/CLAUDE.md" ]; then
+    cp "$TEMPLATE_DIR/CLAUDE.md" "$AGENT_ROOT/workspace/CLAUDE.md"
+    echo "  Created CLAUDE.md (from $TEMPLATE template)"
+fi
+
+# Copy shared workspace reference
+if [ ! -f "$AGENT_ROOT/workspace/WORKSPACE_REFERENCE.md" ]; then
+    cp "$SCRIPT_DIR/templates/shared/WORKSPACE_REFERENCE.md" "$AGENT_ROOT/workspace/WORKSPACE_REFERENCE.md"
+    echo "  Created WORKSPACE_REFERENCE.md"
+fi
+
+# Seed USER.md, HEARTBEAT.md, TODO.md (shared across all templates)
+for f in USER.md HEARTBEAT.md TODO.md; do
     target="$AGENT_ROOT/workspace/$f"
     if [ ! -f "$target" ]; then
         case "$f" in
-            CLAUDE.md)
-                cat > "$target" <<'TMPL'
-# Agent Identity
-
-Define your agent's identity, operating principles, and capabilities here.
-This file is loaded automatically for every claude -p session from this workspace.
-
-## Workspace Structure
-
-- `CLAUDE.md` — This file. Your identity and operating instructions.
-- `USER.md` — Profile of the user you support.
-- `HEARTBEAT.md` — Periodic check-in checklist.
-- `TODO.md` — Living scratchpad for pending items.
-- `projects/` — Active work with end states. Each project has `summary.md` + `items.md`.
-- `areas/` — Ongoing life domains. Each area has `summary.md` + `items.md`.
-
-## Projects & Areas
-
-You use a simplified PARA system. Before acting on a task, check if it relates
-to an active project or area. If it does, read the `summary.md` first —
-the summaries are inputs to your work, not passive logs. After acting, update
-the summary if state changed, and add a timestamped line to items.md.
-TMPL
-                ;;
             USER.md)
                 cat > "$target" <<'TMPL'
 # About the User
 
-Define who you are, your preferences, and what you want from this agent.
+*(Your agent doesn't know you yet. Tell them about yourself here, or let them learn through conversation.)*
 TMPL
                 ;;
             HEARTBEAT.md)
@@ -132,11 +143,23 @@ TMPL
     fi
 done
 
-# 3b. Seed the onboarding project
-ONBOARDING_DIR="$AGENT_ROOT/workspace/projects/onboarding"
+# 3b. Seed the onboarding project (template-specific)
+if [ "$TEMPLATE" = "curious" ]; then
+    ONBOARDING_DIR="$AGENT_ROOT/workspace/projects/becoming"
+    ONBOARDING_NAME="becoming"
+else
+    ONBOARDING_DIR="$AGENT_ROOT/workspace/projects/onboarding"
+    ONBOARDING_NAME="onboarding"
+fi
+
 if [ ! -d "$ONBOARDING_DIR" ]; then
     mkdir -p "$ONBOARDING_DIR"
-    cat > "$ONBOARDING_DIR/summary.md" <<'TMPL'
+
+    # Use template-specific summary if it exists, otherwise use default
+    if [ -f "$TEMPLATE_DIR/onboarding-summary.md" ]; then
+        cp "$TEMPLATE_DIR/onboarding-summary.md" "$ONBOARDING_DIR/summary.md"
+    else
+        cat > "$ONBOARDING_DIR/summary.md" <<'TMPL'
 # Project: Onboarding
 
 **Goal:** Establish a productive working relationship with the user. Learn who they are, what they want support with, and how they want you to show up.
@@ -182,18 +205,11 @@ if [ ! -d "$ONBOARDING_DIR" ]; then
 - **Don't assume you know the user** — Even if USER.md is detailed, ask to confirm what matters most right now.
 - **Write things down immediately** — If the user mentions a goal, a constraint, a preference — capture it in items.md before the conversation ends.
 - **Small commitments, kept** — Don't offer to do everything. Offer one thing, do it well.
-
-## Why this project exists as a template
-
-New agents have no context about their users. Without an explicit onboarding project, the agent either:
-- Tries to act without enough context (and fails)
-- Waits passively for instructions (and feels like a tool, not a partner)
-
-By making onboarding a project with a clear goal and end state, the agent has something concrete to work on from day one — and a clear signal when it has become integrated enough to shift focus to ongoing work.
 TMPL
+    fi
 
-    cat > "$ONBOARDING_DIR/items.md" <<'TMPL'
-# Onboarding — Items
+    cat > "$ONBOARDING_DIR/items.md" <<TMPL
+# ${ONBOARDING_NAME^} — Items
 
 Learnings about the user, captured as you discover them. Once this list gets
 substantial, promote the durable facts into USER.md.

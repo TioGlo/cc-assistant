@@ -25,12 +25,30 @@ systemctl --user start assistant
 
 Your bot should respond to `/start` on Telegram.
 
+## Templates
+
+Install ships with two starting templates that shape how the agent behaves from its first interaction:
+
+```bash
+./install.sh                          # Default: assistant template
+./install.sh --template curious       # Discovery-driven agent
+```
+
+| Template | First interaction | Identity | Best for |
+|----------|------------------|----------|----------|
+| `assistant` | "How can I help you?" | Pre-defined: practical, structured, ready to serve | Users who want a capable agent immediately |
+| `curious` | Self-directed discovery | Blank — agent builds it through interaction | Autonomous agents, deeper working relationships |
+
+Both templates share `WORKSPACE_REFERENCE.md` (PARA docs, directory layout, delegation syntax). The `assistant` template pre-explains the workspace in its `CLAUDE.md`; the `curious` template points to the reference file and focuses on identity discovery.
+
+The `curious` template seeds a "Becoming" project instead of "Onboarding" — the agent's first project is figuring out who it is and who its user is, not running through a setup checklist.
+
 ## Custom Agent Directory
 
 Deploy a named agent with its own identity and workspace:
 
 ```bash
-./install.sh --agent-dir ~/.luci
+./install.sh --agent-dir ~/.luci --template curious
 # Edit ~/.luci/config.yaml
 systemctl --user start luci
 ```
@@ -40,9 +58,9 @@ Each agent gets its own config, workspace, sessions, and systemd service.
 ## Multiple Agents on One Machine
 
 ```bash
-./install.sh                        # ~/.assistant → service: assistant
-./install.sh --agent-dir ~/.luci    # ~/.luci     → service: luci
-./install.sh --agent-dir ~/.cybin   # ~/.cybin    → service: cybin
+./install.sh                                          # ~/.assistant → service: assistant
+./install.sh --agent-dir ~/.luci --template curious   # ~/.luci     → service: luci
+./install.sh --agent-dir ~/.cybin                     # ~/.cybin    → service: cybin
 ```
 
 Each agent needs its own Telegram bot (create via @BotFather).
