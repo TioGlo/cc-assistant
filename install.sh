@@ -68,7 +68,10 @@ mkdir -p "$AGENT_ROOT/pending-approvals"
 # 2. Config file
 echo "[2/6] Setting up config..."
 if [ ! -f "$AGENT_ROOT/config.yaml" ]; then
-    cp "$SCRIPT_DIR/config.example.yaml" "$AGENT_ROOT/config.yaml"
+    sed \
+        -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
+        -e "s|{{AGENT_NAME}}|${AGENT_NAME}|g" \
+        "$SCRIPT_DIR/config.example.yaml" > "$AGENT_ROOT/config.yaml"
     echo "  Created $AGENT_ROOT/config.yaml — edit with your settings"
 else
     echo "  Config already exists, skipping"
