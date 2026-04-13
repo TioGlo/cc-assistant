@@ -1,0 +1,3 @@
+[submodule "browser-mcp"]
+	path = browser-mcp
+	url = https://github.com/TioGlo/browser-mcp.git

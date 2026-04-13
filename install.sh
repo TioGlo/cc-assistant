@@ -238,13 +238,109 @@ for template in "$SCRIPT_DIR"/hooks/*.template; do
     fi
 done
 
-# 5. Install Python dependencies
-echo "[5/6] Installing Python dependencies..."
+# 5. Install browser-mcp (ships with cc-assistant)
+echo "[5/8] Installing browser-mcp..."
+BROWSER_MCP_DIR="$SCRIPT_DIR/browser-mcp"
+if [ -d "$BROWSER_MCP_DIR" ] && [ -f "$BROWSER_MCP_DIR/package.json" ]; then
+    (cd "$BROWSER_MCP_DIR" && npm install --silent && npm run build --silent) 2>&1 | tail -1
+    # Wire up coding agent's .mcp.json
+    CODING_MCP="$AGENT_ROOT/coding/.mcp.json"
+    if [ ! -f "$CODING_MCP" ]; then
+        cat > "$CODING_MCP" <<MCPEOF
+{
+  "mcpServers": {
+    "browser-mcp": {
+      "command": "node",
+      "args": ["$BROWSER_MCP_DIR/dist/index.js"],
+      "env": {
+        "CDP_URL": "http://localhost:9222"
+      }
+    }
+  }
+}
+MCPEOF
+        echo "  browser-mcp configured in $CODING_MCP"
+    else
+        echo "  $CODING_MCP already exists, skipping"
+    fi
+    echo "  Note: Chrome must be running with --remote-debugging-port=9222"
+else
+    echo "  browser-mcp submodule not found — run: git submodule update --init"
+fi
+
+# 6. Optional add-ons (interactive)
+echo ""
+echo "=== Optional Add-ons ==="
+echo ""
+echo "  [1] Google Workspace  — Gmail, Calendar, Drive access via MCP"
+echo "                          (requires Google Cloud OAuth setup after install)"
+echo ""
+read -rp "Install add-ons? (comma-separated numbers, or Enter to skip): " ADDONS
+echo ""
+
+ADDON_GOOGLE=false
+for addon in $(echo "$ADDONS" | tr ',' ' '); do
+    case "$addon" in
+        1) ADDON_GOOGLE=true ;;
+        *) echo "  Unknown add-on: $addon, skipping" ;;
+    esac
+done
+
+if [ "$ADDON_GOOGLE" = true ]; then
+    echo "[6a] Adding Google Workspace MCP..."
+    # Add google-workspace to the coding agent's .mcp.json
+    CODING_MCP="$AGENT_ROOT/coding/.mcp.json"
+    if [ -f "$CODING_MCP" ]; then
+        # Merge into existing .mcp.json
+        python3 -c "
+import json, sys
+with open('$CODING_MCP') as f:
+    config = json.load(f)
+config['mcpServers']['google-workspace'] = {
+    'command': 'uvx',
+    'args': ['workspace-mcp', '--tool-tier', 'extended'],
+    'env': {
+        'GOOGLE_OAUTH_CLIENT_ID': 'YOUR_GOOGLE_CLIENT_ID',
+        'GOOGLE_OAUTH_CLIENT_SECRET': 'YOUR_GOOGLE_CLIENT_SECRET'
+    }
+}
+with open('$CODING_MCP', 'w') as f:
+    json.dump(config, f, indent=2)
+"
+    else
+        cat > "$CODING_MCP" <<'MCPEOF'
+{
+  "mcpServers": {
+    "google-workspace": {
+      "command": "uvx",
+      "args": ["workspace-mcp", "--tool-tier", "extended"],
+      "env": {
+        "GOOGLE_OAUTH_CLIENT_ID": "YOUR_GOOGLE_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET": "YOUR_GOOGLE_CLIENT_SECRET"
+      }
+    }
+  }
+}
+MCPEOF
+    fi
+    echo "  Google Workspace MCP added to $CODING_MCP"
+    echo ""
+    echo "  !! Post-install steps for Google Workspace:"
+    echo "     1. Create a Google Cloud project and enable the Gmail, Calendar, and Drive APIs"
+    echo "     2. Create OAuth 2.0 credentials (Desktop app type)"
+    echo "     3. Edit $CODING_MCP — replace YOUR_GOOGLE_CLIENT_ID and YOUR_GOOGLE_CLIENT_SECRET"
+    echo "     4. Run: uvx workspace-mcp --authenticate"
+    echo "        to complete the OAuth flow and store refresh tokens"
+    echo ""
+fi
+
+# 7. Install Python dependencies
+echo "[7/8] Installing Python dependencies..."
 cd "$SCRIPT_DIR"
 uv sync 2>&1 | tail -1
 
-# 6. Install systemd user service
-echo "[6/6] Installing systemd service..."
+# 8. Install systemd user service
+echo "[8/8] Installing systemd service..."
 mkdir -p "$HOME/.config/systemd/user"
 sed \
     -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
