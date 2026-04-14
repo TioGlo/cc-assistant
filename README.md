@@ -124,6 +124,8 @@ claude:
   system_prompt: |
     You are a personal AI assistant accessible via Telegram.
     # ... see config.example.yaml for full template
+  system_prompt_files:              # files appended to system prompt per invocation
+    - "~/.myagent/workspace/self-improving/memory.md"
   max_turns: 50
   timeout: 300
   mcp_config: "/path/to/mcp.json"  # optional MCP server config
@@ -150,6 +152,19 @@ scheduler:
 #   channels:
 #     "#general": { enabled: true, requireMention: false }
 ```
+
+### system_prompt_files
+
+Append file contents to the system prompt on every `claude -p` invocation. Files are read fresh each call — updates take effect immediately without restarting the service.
+
+```yaml
+claude:
+  system_prompt_files:
+    - "~/.myagent/workspace/self-improving/memory.md"
+    - "~/.myagent/workspace/some-other-context.md"
+```
+
+Use this to inject dynamic context like self-improving rules, learned preferences, or any file that changes over time and should be part of every conversation. If a file doesn't exist or can't be read, it's silently skipped.
 
 ### cc_agents
 
