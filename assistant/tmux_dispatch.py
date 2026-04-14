@@ -66,10 +66,15 @@ class TmuxSession:
         logger.warning("Claude Code may not be fully initialized in '%s'", self.tmux_session)
 
     async def send_message(self, message: str) -> None:
-        await self._run("tmux", "send-keys", "-t", self.tmux_session, message, "C-m")
+        # Step 1: Type the text into the TUI (no Enter yet)
+        await self._run("tmux", "send-keys", "-t", self.tmux_session, message)
+        # Step 2: Wait for the TUI to process the pasted text
+        await asyncio.sleep(1.0)
+        # Step 3: Press Enter to submit
+        await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter")
+        # Step 4: Extra Enter after a pause — Claude Code's TUI sometimes needs
+        # a second Enter to actually begin processing (confirmation prompt)
         await asyncio.sleep(0.5)
-        await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter", "C-m")
-        await asyncio.sleep(0.3)
         await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter")
 
     async def capture_recent_output(self, lines: int = 50) -> str:
