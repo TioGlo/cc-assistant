@@ -27,6 +27,25 @@ class TmuxSession:
         self.permission_mode = agent.permission_mode
         self._active_task: str | None = None
         self._watcher_task: asyncio.Task | None = None
+        self._session_file = paths.signals_dir() / f"tmux-session-{self.name}.json"
+
+    def _load_claude_session_id(self) -> str | None:
+        """Load the Claude Code session ID for this tmux agent."""
+        if self._session_file.exists():
+            try:
+                data = json.loads(self._session_file.read_text())
+                return data.get("session_id")
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None
+
+    def _save_claude_session_id(self, session_id: str) -> None:
+        """Save the Claude Code session ID for this tmux agent."""
+        self._session_file.write_text(json.dumps({
+            "session_id": session_id,
+            "agent": self.name,
+            "updated_at": time.time(),
+        }, indent=2))
 
     async def _run(self, *args: str) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -50,9 +69,15 @@ class TmuxSession:
         if rc != 0:
             raise TmuxDispatchError(f"Failed to create tmux session: {stderr}")
         await asyncio.sleep(1)
+        # Build claude command with --resume if we have a prior session
+        claude_cmd = f"claude --{self.permission_mode}"
+        session_id = self._load_claude_session_id()
+        if session_id:
+            claude_cmd += f" --resume {session_id}"
+            logger.info("Resuming Claude session '%s' in '%s'", session_id[:12], self.tmux_session)
         await self._run(
             "tmux", "send-keys", "-t", self.tmux_session,
-            f"claude --{self.permission_mode}", "C-m",
+            claude_cmd, "C-m",
         )
         logger.info("Waiting for Claude Code to initialize in '%s'...", self.tmux_session)
         for _ in range(30):
@@ -185,6 +210,8 @@ class TmuxDispatch:
                     result_text = result_file.read_text() if result_file.exists() else "Task completed."
                     logger.info("Task %s completed after %ds", task_id, elapsed)
                     signal_file.unlink(missing_ok=True)
+                    # Capture Claude session ID for future --resume
+                    self._capture_session_id(sess)
                     if self._callback:
                         await self._callback(task_id, result_text)
                     return
@@ -202,3 +229,29 @@ class TmuxDispatch:
         finally:
             sess._active_task = None
             sess._watcher_task = None
+
+    @staticmethod
+    def _capture_session_id(sess: TmuxSession) -> None:
+        """Find the most recent Claude session ID for this agent's working directory."""
+        try:
+            # Claude stores sessions under ~/.claude/projects/{path-hash}/
+            # The path hash is the working dir with / replaced by -
+            claude_dir = Path.home() / ".claude" / "projects"
+            if not claude_dir.exists():
+                return
+            # Find the project dir matching the agent's working directory
+            dir_key = str(sess.working_dir).replace("/", "-").lstrip("-")
+            matching = [d for d in claude_dir.iterdir() if d.is_dir() and dir_key in d.name]
+            if not matching:
+                return
+            project_dir = matching[0]
+            # Find the most recent .jsonl session file
+            sessions = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if not sessions:
+                return
+            # Session ID is the filename without extension
+            session_id = sessions[0].stem
+            sess._save_claude_session_id(session_id)
+            logger.info("Captured session ID '%s' for agent '%s'", session_id[:12], sess.name)
+        except Exception as e:
+            logger.debug("Could not capture session ID for '%s': %s", sess.name, e)
