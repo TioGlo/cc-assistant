@@ -62,3 +62,10 @@ scheduler:
   # - name: "heartbeat"
   #   prompt: "Read the HEARTBEAT.md in your workspace and follow its instructions."
   #   cron: "25 */2 * * *"
+  #   session: "chat"          # optional: session key (default: "chat")
+  #                            # jobs with the same key share conversation context
+  #                            # use a different key to isolate a job's context:
+  # - name: "research-digest"
+  #   prompt: "Check AI news sources and summarize what's new."
+  #   cron: "0 7 * * *"
+  #   session: "research"      # runs in its own session, won't pollute the main chat

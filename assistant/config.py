@@ -39,6 +39,7 @@ class ScheduledJob:
     prompt: str
     cron: str
     working_dir: str | None = None
+    session: str = "chat"  # session key in session.json; jobs with the same key share context
 
 
 @dataclass
