@@ -1,0 +1,7 @@
+#!/bin/bash
+# Self-improving activator hook.
+# Register as UserPromptSubmit hook in ~/.claude/settings.json.
+# Injects a brief reminder after every user prompt.
+cat <<'EOF'
+[Self-improving] If this interaction involves a correction, error, or new learning, log it to self-improving/corrections.md. If starting non-trivial work, check self-improving/memory.md first.
+EOF

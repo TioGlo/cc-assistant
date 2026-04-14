@@ -91,7 +91,7 @@ def main() -> None:
     app.post_shutdown = post_shutdown
 
     logger.info("Starting %s bot...", paths.agent_name())
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, bootstrap_retries=-1)
 
 
 if __name__ == "__main__":

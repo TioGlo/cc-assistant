@@ -25,10 +25,9 @@ claude:
 
     To delegate a complex task to a full interactive Claude session:
     <!--DELEGATE:{"task":"detailed description","timeout":600}-->
-  # Files to append to system prompt (read fresh each invocation)
-  # Useful for injecting self-improving rules, dynamic context, etc.
-  # system_prompt_files:
-  #   - "{{AGENT_ROOT}}/workspace/self-improving/memory.md"
+  # Files appended to system prompt (read fresh each invocation)
+  system_prompt_files:
+    - "{{AGENT_ROOT}}/workspace/self-improving/memory.md"
   # Max agentic turns per invocation
   max_turns: 50
   # Timeout in seconds for each claude invocation

@@ -59,6 +59,9 @@ echo "[1/6] Creating directory structure..."
 mkdir -p "$AGENT_ROOT/workspace"
 mkdir -p "$AGENT_ROOT/workspace/projects"
 mkdir -p "$AGENT_ROOT/workspace/areas"
+mkdir -p "$AGENT_ROOT/workspace/self-improving/projects"
+mkdir -p "$AGENT_ROOT/workspace/self-improving/domains"
+mkdir -p "$AGENT_ROOT/workspace/self-improving/archive"
 mkdir -p "$AGENT_ROOT/signals"
 mkdir -p "$AGENT_ROOT/coding"
 mkdir -p "$AGENT_ROOT/modules"
@@ -91,6 +94,15 @@ if [ ! -f "$AGENT_ROOT/workspace/WORKSPACE_REFERENCE.md" ]; then
     cp "$SCRIPT_DIR/templates/shared/WORKSPACE_REFERENCE.md" "$AGENT_ROOT/workspace/WORKSPACE_REFERENCE.md"
     echo "  Created WORKSPACE_REFERENCE.md"
 fi
+
+# Seed self-improving files
+for f in memory.md corrections.md; do
+    target="$AGENT_ROOT/workspace/self-improving/$f"
+    if [ ! -f "$target" ]; then
+        cp "$SCRIPT_DIR/templates/shared/self-improving/$f" "$target"
+        echo "  Created self-improving/$f"
+    fi
+done
 
 # Seed USER.md, HEARTBEAT.md, TODO.md (shared across all templates)
 for f in USER.md HEARTBEAT.md TODO.md; do
@@ -125,7 +137,13 @@ Define what to check on each periodic heartbeat. Work through sections in order.
 ## 3. System Health
 - Verify services are running
 
-## 4. TODO List
+## 4. Self-Improving
+- Read `self-improving/corrections.md` — any pending entries that should be promoted?
+- Pattern repeated 3x → promote to `self-improving/memory.md`
+- Check if `memory.md` exceeds 100 lines — compact if needed
+- Unused rules (30+ days) → demote to domains/ or archive/
+
+## 5. TODO List
 - Check TODO.md for pending items
 - If a TODO has grown into something bigger, promote it to a project folder
 TMPL
@@ -362,6 +380,7 @@ echo "  │   ├── CLAUDE.md          # Agent identity"
 echo "  │   ├── USER.md            # User profile"
 echo "  │   ├── HEARTBEAT.md       # Periodic check-in checklist"
 echo "  │   ├── TODO.md            # Living scratchpad"
+echo "  │   ├── self-improving/     # Tiered learning system (memory, corrections, domains)"
 echo "  │   ├── projects/          # Active work with end states"
 echo "  │   └── areas/             # Ongoing life domains"
 echo "  ├── modules/               # Custom modules (telegram.py, cron.py per module)"

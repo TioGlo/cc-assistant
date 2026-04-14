@@ -1,0 +1,11 @@
+#!/bin/bash
+# Self-improving error detector hook.
+# Register as PostToolUse hook (matcher: "Bash") in ~/.claude/settings.json.
+# Detects non-zero exit codes and reminds the agent to evaluate for logging.
+
+INPUT=$(cat)
+EXIT_CODE=$(echo "$INPUT" | grep -oP 'Exit code \K[0-9]+' | head -1)
+
+if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" -ne 0 ]; then
+  echo "[Self-improving] Command failed (exit $EXIT_CODE). If this reveals a learning or recurring issue, log to self-improving/corrections.md."
+fi

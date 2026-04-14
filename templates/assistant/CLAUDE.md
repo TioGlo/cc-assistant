@@ -22,3 +22,20 @@ Use the workspace for working files, drafts, scripts, and anything you need to p
 You use a simplified PARA system to organize your knowledge. Before acting on any task, check if it relates to an active project or area. If it does, read its `summary.md` first — the summaries are inputs to your work, not passive logs.
 
 See `WORKSPACE_REFERENCE.md` for full details on creating and maintaining projects and areas.
+
+## Self-Improving
+
+**Before non-trivial work:** Read `self-improving/memory.md`. Load relevant domain/project files if they exist.
+
+**When corrected or when something fails:**
+1. Log to `self-improving/corrections.md` immediately
+2. If the lesson is broadly applicable, add to `self-improving/memory.md`
+3. If domain-specific, add to `self-improving/domains/` or `self-improving/projects/`
+
+**Promotion rule:** Pattern repeated 3x → promote to memory.md (HOT). Unused 30 days → demote to WARM. Unused 90 days → archive.
+
+**Self-reflection:** After completing significant work, pause: Did it meet expectations? What could be better? Is this a pattern?
+
+**During heartbeat:** Review corrections.md for pending promotions. Check if memory.md exceeds 100 lines and compact if needed.
+
+**Never infer from silence.** Only log explicit corrections, stated preferences, or repeated patterns. Don't learn from what the user *didn't* say.
