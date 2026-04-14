@@ -16,6 +16,7 @@ class ClaudeConfig:
     permission_mode: str = "bypassPermissions"
     allowed_tools: list[str] = field(default_factory=list)
     system_prompt: str = ""
+    system_prompt_files: list[str] = field(default_factory=list)  # paths read and appended to system_prompt per invocation
     max_turns: int = 50
     timeout: int = 300
     mcp_config: str | None = None

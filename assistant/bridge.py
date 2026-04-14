@@ -36,8 +36,16 @@ class ClaudeBridge:
         ]
         if session_id:
             args.extend(["--resume", session_id])
-        if self.config.system_prompt:
-            args.extend(["--append-system-prompt", self.config.system_prompt])
+        system_prompt = self.config.system_prompt or ""
+        for fpath in self.config.system_prompt_files:
+            p = Path(fpath).expanduser()
+            if p.exists():
+                try:
+                    system_prompt += "\n\n" + p.read_text().strip()
+                except OSError:
+                    pass
+        if system_prompt.strip():
+            args.extend(["--append-system-prompt", system_prompt.strip()])
         if self.config.allowed_tools:
             args.extend(["--allowed-tools", *self.config.allowed_tools])
         if self.config.mcp_config:
