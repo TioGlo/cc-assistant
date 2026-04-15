@@ -28,6 +28,7 @@ class CCAgent:
     tmux_session: str = ""  # defaults to name if empty
     working_dir: str = ""   # defaults to {AGENT_ROOT}/coding if empty
     permission_mode: str = "dangerously-skip-permissions"
+    resume: bool = True     # resume prior Claude session on tmux recreation
 
     def __post_init__(self):
         if not self.tmux_session:

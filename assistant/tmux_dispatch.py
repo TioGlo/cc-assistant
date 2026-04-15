@@ -27,6 +27,7 @@ class TmuxSession:
         self.permission_mode = agent.permission_mode
         self._active_task: str | None = None
         self._watcher_task: asyncio.Task | None = None
+        self.resume = agent.resume
         self._session_file = paths.signals_dir() / f"tmux-session-{self.name}.json"
 
     def _load_claude_session_id(self) -> str | None:
@@ -69,12 +70,13 @@ class TmuxSession:
         if rc != 0:
             raise TmuxDispatchError(f"Failed to create tmux session: {stderr}")
         await asyncio.sleep(1)
-        # Build claude command with --resume if we have a prior session
+        # Build claude command with --resume if enabled and we have a prior session
         claude_cmd = f"claude --{self.permission_mode}"
-        session_id = self._load_claude_session_id()
-        if session_id:
-            claude_cmd += f" --resume {session_id}"
-            logger.info("Resuming Claude session '%s' in '%s'", session_id[:12], self.tmux_session)
+        if self.resume:
+            session_id = self._load_claude_session_id()
+            if session_id:
+                claude_cmd += f" --resume {session_id}"
+                logger.info("Resuming Claude session '%s' in '%s'", session_id[:12], self.tmux_session)
         await self._run(
             "tmux", "send-keys", "-t", self.tmux_session,
             claude_cmd, "C-m",
@@ -211,7 +213,8 @@ class TmuxDispatch:
                     logger.info("Task %s completed after %ds", task_id, elapsed)
                     signal_file.unlink(missing_ok=True)
                     # Capture Claude session ID for future --resume
-                    self._capture_session_id(sess)
+                    if sess.resume:
+                        self._capture_session_id(sess)
                     if self._callback:
                         await self._callback(task_id, result_text)
                     return

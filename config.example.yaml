@@ -53,10 +53,12 @@ cc_agents:
     tmux_session: "{{AGENT_NAME}}-code"
     working_dir: "{{AGENT_ROOT}}/coding"
     # permission_mode: "dangerously-skip-permissions"  # default
+    # resume: true          # resume prior Claude session on tmux recreation (default: true)
   # Additional agents:
   # - name: "research"
   #   tmux_session: "research"
   #   working_dir: "{{AGENT_ROOT}}/research"
+  #   resume: false          # start fresh every time
 
 scheduler:
   # Pre-configured recurring jobs
