@@ -61,16 +61,16 @@ cc_agents:
   #   resume: false          # start fresh every time
 
 scheduler:
-  # Pre-configured recurring jobs
-  jobs: []
-  # Example:
-  # - name: "heartbeat"
-  #   prompt: "Read the HEARTBEAT.md in your workspace and follow its instructions."
-  #   cron: "25 */2 * * *"
-  #   session: "chat"          # optional: session key (default: "chat")
-  #                            # jobs with the same key share conversation context
-  #                            # use a different key to isolate a job's context:
+  # Seed jobs — merged into scheduler-jobs.json on first run, then managed dynamically.
+  # The agent can create/modify jobs at runtime via SCHEDULE blocks.
+  # Config seeds only run once — editing here after first run has no effect.
+  # To modify a running job, use /cancel then /schedule, or have the agent emit a SCHEDULE block.
+  jobs:
+    - name: "heartbeat"
+      prompt: "Read the HEARTBEAT.md in your workspace and follow its instructions."
+      cron: "25 */2 * * *"
+  # More examples:
   # - name: "research-digest"
   #   prompt: "Check AI news sources and summarize what's new."
   #   cron: "0 7 * * *"
-  #   session: "research"      # runs in its own session, won't pollute the main chat
+  #   session: "research"      # optional: isolate this job's context from the main chat

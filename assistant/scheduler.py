@@ -85,34 +85,42 @@ class Scheduler:
 
     # -- Job loading --
 
-    def load_config_jobs(self, jobs: list[ScheduledJob]) -> None:
-        existing = {j.id for j in self._scheduler.get_jobs()}
-        for job in jobs:
-            job_id = f"config_{job.name}"
-            if job_id not in existing:
-                self._add_to_scheduler(job.name, job.prompt, job.cron, job.working_dir,
-                                       session=job.session, job_id_prefix="config_")
-                logger.info("Loaded config job: %s (%s)", job.name, job.cron)
+    def seed_config_jobs(self, jobs: list[ScheduledJob]) -> None:
+        """Seed config.yaml jobs into the dynamic jobs file (one-time merge).
 
-    def load_dynamic_jobs(self) -> None:
-        existing = {j.id for j in self._scheduler.get_jobs()}
+        Config jobs are initial seeds — once they exist in scheduler-jobs.json,
+        they're managed through the dynamic system like any other job.
+        """
+        dynamic = self._load_dynamic_jobs()
+        dynamic_names = {j["name"] for j in dynamic}
+        seeded = 0
+        for job in jobs:
+            if job.name not in dynamic_names:
+                self._append_dynamic_job(job.name, job.prompt, job.cron,
+                                         job.working_dir, session=job.session)
+                seeded += 1
+                logger.info("Seeded job from config: %s (%s)", job.name, job.cron)
+        if seeded:
+            logger.info("Seeded %d new jobs from config.yaml", seeded)
+
+    def load_jobs(self) -> None:
+        """Load all jobs from the dynamic jobs file into the scheduler."""
         for job in self._load_dynamic_jobs():
-            job_id = f"user_{job['name']}"
-            if job_id not in existing:
+            job_id = f"job_{job['name']}"
+            if job_id not in {j.id for j in self._scheduler.get_jobs()}:
                 self._add_to_scheduler(job["name"], job["prompt"], job["cron"],
                                        job.get("working_dir"), session=job.get("session", "chat"),
-                                       job_id_prefix="user_")
-                logger.info("Loaded dynamic job: %s (%s)", job["name"], job["cron"])
+                                       job_id_prefix="job_")
+                logger.info("Loaded job: %s (%s, session=%s)", job["name"], job["cron"],
+                            job.get("session", "chat"))
 
     # -- Public API --
 
     def add_cron_job(self, name: str, prompt: str, cron_expr: str,
-                     working_dir: str | None = None, session: str = "chat",
-                     job_id_prefix: str = "user_") -> str:
+                     working_dir: str | None = None, session: str = "chat") -> str:
         job_id = self._add_to_scheduler(name, prompt, cron_expr, working_dir,
-                                        session=session, job_id_prefix=job_id_prefix)
-        if job_id_prefix == "user_":
-            self._append_dynamic_job(name, prompt, cron_expr, working_dir, session=session)
+                                        session=session, job_id_prefix="job_")
+        self._append_dynamic_job(name, prompt, cron_expr, working_dir, session=session)
         return job_id
 
     def add_one_shot(self, prompt: str, delay: str, working_dir: str | None = None,
@@ -131,7 +139,7 @@ class Scheduler:
 
     def remove_job(self, name: str) -> bool:
         removed = False
-        for prefix in ("user_", "config_", "remind_"):
+        for prefix in ("job_", "user_", "config_", "remind_"):
             try:
                 self._scheduler.remove_job(f"{prefix}{name}")
                 removed = True

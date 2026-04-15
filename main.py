@@ -77,8 +77,8 @@ def main() -> None:
     async def post_init(application) -> None:
         scheduler.start()
         if config.scheduler.jobs:
-            scheduler.load_config_jobs(config.scheduler.jobs)
-        scheduler.load_dynamic_jobs()
+            scheduler.seed_config_jobs(config.scheduler.jobs)
+        scheduler.load_jobs()
         logger.info("Scheduler started")
         await slack_monitor.start()
 
