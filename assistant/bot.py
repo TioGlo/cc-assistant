@@ -15,7 +15,7 @@ from telegram.ext import (
 )
 
 from . import paths
-from .bridge import AuthError, ClaudeBridge
+from .bridge import AuthError, BridgeError, ClaudeBridge
 from .config import Config
 from .formatter import (
     extract_delegate_commands,
@@ -323,7 +323,15 @@ class AssistantBot:
         typing_task = asyncio.create_task(self._keep_typing(chat_id))
         try:
             session_id = self.session_manager.get_session_id("chat")
-            response_text, new_session_id = await self.bridge.send_simple(text, session_id=session_id)
+            try:
+                response_text, new_session_id = await self.bridge.send_simple(text, session_id=session_id)
+            except BridgeError as e:
+                if session_id and "No conversation found" in str(e):
+                    logger.info("Stale chat session, falling back to fresh")
+                    self.session_manager.clear_session("chat")
+                    response_text, new_session_id = await self.bridge.send_simple(text)
+                else:
+                    raise
             if new_session_id:
                 self.session_manager.set_session_id(new_session_id, "chat")
             self._process_commands(response_text)
