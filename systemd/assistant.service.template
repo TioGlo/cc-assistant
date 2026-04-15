@@ -15,6 +15,7 @@ KillMode=process
 
 Environment=PATH=%h/.local/bin:%h/bin:%h/.bun/bin:%h/.local/share/pnpm:%h/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HOME=%h
+Environment=PYTHONUNBUFFERED=1
 
 StandardOutput=journal
 StandardError=journal
