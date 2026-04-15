@@ -36,13 +36,23 @@ if [ "$COUNT" -ge "$THRESHOLD" ]; then
   echo "0" > "$COUNTER_FILE"
   cat <<'EOF'
 [Self-improving — REFLECTION REQUIRED]
-You have made 15+ tool calls this turn. Before continuing, you MUST:
+You have made 15+ tool calls. Before continuing, you MUST answer two questions:
 
-1. Review what you just did — were there errors, retries, course corrections, or discoveries?
-2. If yes, log them to self-improving/corrections.md NOW (one line per learning)
-3. If an approach worked particularly well, log it as a positive signal
-4. Then continue with your task
+QUESTION 1 — CORRECTIONS: Were there errors, retries, course corrections, or discoveries?
+If yes → log them to self-improving/corrections.md (one line per learning)
+If an approach worked well → log it as a positive signal
 
-This is not optional. Do it now, then proceed.
+QUESTION 2 — SKILL: Did you just execute a non-trivial multi-step workflow that required
+trial and error, domain knowledge, or a specific sequence of actions to get right?
+If yes → write it as a reusable skill. Create a markdown file in self-improving/domains/
+or self-improving/projects/ with:
+  - What the task was
+  - The exact steps that worked (not the ones that didn't)
+  - Any gotchas or prerequisites
+  - When to use this approach again
+Name it descriptively (e.g., "instagram-carousel-posting.md", "comfyui-batch-generation.md").
+Only write a skill if the workflow was genuinely non-obvious — don't skill-ify simple tasks.
+
+This is not optional. Answer both questions, then proceed.
 EOF
 fi
