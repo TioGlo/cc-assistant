@@ -1,0 +1,48 @@
+#!/bin/bash
+# Self-improving reflection trigger.
+# Register as PostToolUse hook (matcher: "") in .claude/settings.json.
+# Counts tool calls per session. After THRESHOLD calls, forces a reflection.
+# Counter resets after reflection is triggered.
+
+THRESHOLD=15
+COUNTER_FILE="/tmp/claude-si-counter-$$"
+
+# Use parent PID as session identifier (claude's PID stays constant within a session)
+PPID_FILE="/tmp/claude-si-ppid"
+CURRENT_PPID=$(ps -o ppid= $$ 2>/dev/null | tr -d ' ')
+
+# Reset counter if this is a new session (different parent PID)
+if [ -f "$PPID_FILE" ]; then
+  LAST_PPID=$(cat "$PPID_FILE")
+  if [ "$CURRENT_PPID" != "$LAST_PPID" ]; then
+    rm -f /tmp/claude-si-counter-* 2>/dev/null
+  fi
+fi
+echo "$CURRENT_PPID" > "$PPID_FILE"
+
+# Use a stable counter file keyed to the parent PID
+COUNTER_FILE="/tmp/claude-si-counter-${CURRENT_PPID}"
+
+# Increment counter
+COUNT=0
+if [ -f "$COUNTER_FILE" ]; then
+  COUNT=$(cat "$COUNTER_FILE")
+fi
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$COUNTER_FILE"
+
+# After threshold, force reflection and reset
+if [ "$COUNT" -ge "$THRESHOLD" ]; then
+  echo "0" > "$COUNTER_FILE"
+  cat <<'EOF'
+[Self-improving — REFLECTION REQUIRED]
+You have made 15+ tool calls this turn. Before continuing, you MUST:
+
+1. Review what you just did — were there errors, retries, course corrections, or discoveries?
+2. If yes, log them to self-improving/corrections.md NOW (one line per learning)
+3. If an approach worked particularly well, log it as a positive signal
+4. Then continue with your task
+
+This is not optional. Do it now, then proceed.
+EOF
+fi
