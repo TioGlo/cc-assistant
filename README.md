@@ -177,8 +177,13 @@ cc_agents:
   - name: "research"                # long-running research
     tmux_session: "research"
     working_dir: "~/.myagent/research"
-    permission_mode: "auto"         # when auto-mode bug is fixed
+    resume: true                    # resume prior session on tmux recreation (default)
+  - name: "worker"                  # ephemeral, no memory between tasks
+    tmux_session: "worker"
+    resume: false                   # start fresh every time
 ```
+
+By default, agents resume their prior Claude Code session when their tmux session is recreated (e.g. after a crash or service restart). Set `resume: false` for agents that should start with a clean slate on every dispatch.
 
 Agents are auto-created on first `/code` dispatch. Or start manually:
 
