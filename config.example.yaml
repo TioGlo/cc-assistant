@@ -47,14 +47,20 @@ claude:
 #       requireMention: false
 
 # Claude Code tmux agents for task delegation
-# The first agent is the default target for DELEGATE blocks
+# The first agent is the default target for DELEGATE blocks.
+# The workspace agent shares the same CLAUDE.md and context as the bot —
+# use it for deep work, planning, browser automation, anything that needs
+# more than the bot's 300s timeout.
 cc_agents:
-  - name: "{{AGENT_NAME}}-code"
-    tmux_session: "{{AGENT_NAME}}-code"
-    working_dir: "{{AGENT_ROOT}}/coding"
+  - name: "{{AGENT_NAME}}-workspace"
+    tmux_session: "{{AGENT_NAME}}-workspace"
+    working_dir: "{{AGENT_ROOT}}/workspace"
     # permission_mode: "dangerously-skip-permissions"  # default
     # resume: true          # resume prior Claude session on tmux recreation (default: true)
-  # Additional agents:
+  # Additional agents (add as needed):
+  # - name: "{{AGENT_NAME}}-code"
+  #   tmux_session: "{{AGENT_NAME}}-code"
+  #   working_dir: "{{AGENT_ROOT}}/coding"
   # - name: "research"
   #   tmux_session: "research"
   #   working_dir: "{{AGENT_ROOT}}/research"

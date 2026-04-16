@@ -63,7 +63,6 @@ mkdir -p "$AGENT_ROOT/workspace/self-improving/projects"
 mkdir -p "$AGENT_ROOT/workspace/self-improving/domains"
 mkdir -p "$AGENT_ROOT/workspace/self-improving/archive"
 mkdir -p "$AGENT_ROOT/signals"
-mkdir -p "$AGENT_ROOT/coding"
 mkdir -p "$AGENT_ROOT/modules"
 mkdir -p "$AGENT_ROOT/hooks"
 mkdir -p "$AGENT_ROOT/pending-approvals"
@@ -261,10 +260,10 @@ echo "[5/8] Installing browser-mcp..."
 BROWSER_MCP_DIR="$SCRIPT_DIR/browser-mcp"
 if [ -d "$BROWSER_MCP_DIR" ] && [ -f "$BROWSER_MCP_DIR/package.json" ]; then
     (cd "$BROWSER_MCP_DIR" && npm install --silent && npm run build --silent) 2>&1 | tail -1
-    # Wire up coding agent's .mcp.json
-    CODING_MCP="$AGENT_ROOT/coding/.mcp.json"
-    if [ ! -f "$CODING_MCP" ]; then
-        cat > "$CODING_MCP" <<MCPEOF
+    # Wire up workspace agent's .mcp.json
+    WORKSPACE_MCP="$AGENT_ROOT/workspace/.mcp.json"
+    if [ ! -f "$WORKSPACE_MCP" ]; then
+        cat > "$WORKSPACE_MCP" <<MCPEOF
 {
   "mcpServers": {
     "browser-mcp": {
@@ -277,9 +276,9 @@ if [ -d "$BROWSER_MCP_DIR" ] && [ -f "$BROWSER_MCP_DIR/package.json" ]; then
   }
 }
 MCPEOF
-        echo "  browser-mcp configured in $CODING_MCP"
+        echo "  browser-mcp configured in $WORKSPACE_MCP"
     else
-        echo "  $CODING_MCP already exists, skipping"
+        echo "  $WORKSPACE_MCP already exists, skipping"
     fi
     echo "  Note: Chrome must be running with --remote-debugging-port=9222"
 else
@@ -306,13 +305,13 @@ done
 
 if [ "$ADDON_GOOGLE" = true ]; then
     echo "[6a] Adding Google Workspace MCP..."
-    # Add google-workspace to the coding agent's .mcp.json
-    CODING_MCP="$AGENT_ROOT/coding/.mcp.json"
-    if [ -f "$CODING_MCP" ]; then
+    # Add google-workspace to the workspace agent's .mcp.json
+    WORKSPACE_MCP="$AGENT_ROOT/workspace/.mcp.json"
+    if [ -f "$WORKSPACE_MCP" ]; then
         # Merge into existing .mcp.json
         python3 -c "
 import json, sys
-with open('$CODING_MCP') as f:
+with open('$WORKSPACE_MCP') as f:
     config = json.load(f)
 config['mcpServers']['google-workspace'] = {
     'command': 'uvx',
@@ -322,11 +321,11 @@ config['mcpServers']['google-workspace'] = {
         'GOOGLE_OAUTH_CLIENT_SECRET': 'YOUR_GOOGLE_CLIENT_SECRET'
     }
 }
-with open('$CODING_MCP', 'w') as f:
+with open('$WORKSPACE_MCP', 'w') as f:
     json.dump(config, f, indent=2)
 "
     else
-        cat > "$CODING_MCP" <<'MCPEOF'
+        cat > "$WORKSPACE_MCP" <<'MCPEOF'
 {
   "mcpServers": {
     "google-workspace": {
@@ -341,12 +340,12 @@ with open('$CODING_MCP', 'w') as f:
 }
 MCPEOF
     fi
-    echo "  Google Workspace MCP added to $CODING_MCP"
+    echo "  Google Workspace MCP added to $WORKSPACE_MCP"
     echo ""
     echo "  !! Post-install steps for Google Workspace:"
     echo "     1. Create a Google Cloud project and enable the Gmail, Calendar, and Drive APIs"
     echo "     2. Create OAuth 2.0 credentials (Desktop app type)"
-    echo "     3. Edit $CODING_MCP — replace YOUR_GOOGLE_CLIENT_ID and YOUR_GOOGLE_CLIENT_SECRET"
+    echo "     3. Edit $WORKSPACE_MCP — replace YOUR_GOOGLE_CLIENT_ID and YOUR_GOOGLE_CLIENT_SECRET"
     echo "     4. Run: uvx workspace-mcp --authenticate"
     echo "        to complete the OAuth flow and store refresh tokens"
     echo ""
@@ -385,7 +384,6 @@ echo "  │   ├── projects/          # Active work with end states"
 echo "  │   └── areas/             # Ongoing life domains"
 echo "  ├── modules/               # Custom modules (telegram.py, cron.py per module)"
 echo "  ├── signals/               # Task completion signals"
-echo "  ├── coding/                # Tmux Claude working directory"
 echo "  ├── hooks/                 # Notification and lifecycle hooks"
 echo "  └── pending-approvals/     # Tmux permission approval queue"
 echo ""

@@ -170,17 +170,17 @@ Use this to inject dynamic context like self-improving rules, learned preference
 
 Define one or more tmux Claude Code sessions. The first is the default delegation target.
 
+The default agent runs from the workspace — it shares the same CLAUDE.md, projects, areas, and self-improving system as the bot. Use it for deep work, planning, browser automation, anything that needs more than the bot's timeout.
+
 ```yaml
 cc_agents:
-  - name: "code"                    # general coding
-    tmux_session: "code"
-  - name: "research"                # long-running research
-    tmux_session: "research"
-    working_dir: "~/.myagent/research"
-    resume: true                    # resume prior session on tmux recreation (default)
-  - name: "worker"                  # ephemeral, no memory between tasks
-    tmux_session: "worker"
-    resume: false                   # start fresh every time
+  - name: "my-workspace"              # default: shares workspace context with bot
+    tmux_session: "my-workspace"
+    working_dir: "~/.myagent/workspace"
+  - name: "my-code"                    # optional: dedicated coding agent
+    tmux_session: "my-code"
+    working_dir: "~/.myagent/coding"
+    resume: false                      # start fresh every time
 ```
 
 By default, agents resume their prior Claude Code session when their tmux session is recreated (e.g. after a crash or service restart). Set `resume: false` for agents that should start with a clean slate on every dispatch.
@@ -188,7 +188,7 @@ By default, agents resume their prior Claude Code session when their tmux sessio
 Agents are auto-created on first `/code` dispatch. Or start manually:
 
 ```bash
-tmux new-session -s my-code -c ~/.assistant/coding
+tmux new-session -s my-workspace -c ~/.myagent/workspace
 claude --dangerously-skip-permissions
 ```
 
