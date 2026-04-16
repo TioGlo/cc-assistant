@@ -35,6 +35,7 @@ class Scheduler:
         self.bridge = bridge
         self.session_manager = session_manager
         self._jobs_file = jobs_file
+        self._reminders_file = jobs_file.parent / "scheduler-reminders.json"
         self._callback: JobCallback | None = None
         self._scheduler = AsyncIOScheduler()
 
@@ -75,6 +76,35 @@ class Scheduler:
         jobs.append(entry)
         self._save_dynamic_jobs(jobs)
 
+    def _load_reminders(self) -> list[dict]:
+        if not self._reminders_file.exists():
+            return []
+        try:
+            return json.loads(self._reminders_file.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to load reminders: %s", e)
+            return []
+
+    def _save_reminders(self, reminders: list[dict]) -> None:
+        self._reminders_file.parent.mkdir(parents=True, exist_ok=True)
+        self._reminders_file.write_text(json.dumps(reminders, indent=2))
+
+    def _append_reminder(self, reminder_id: str, prompt: str, run_at: datetime,
+                         session: str = "chat") -> None:
+        reminders = self._load_reminders()
+        reminders.append({
+            "id": reminder_id,
+            "prompt": prompt,
+            "run_at": run_at.isoformat(),
+            "session": session,
+        })
+        self._save_reminders(reminders)
+
+    def _remove_reminder(self, reminder_id: str) -> None:
+        reminders = self._load_reminders()
+        filtered = [r for r in reminders if r["id"] != reminder_id]
+        self._save_reminders(filtered)
+
     def _remove_dynamic_job(self, name: str) -> bool:
         jobs = self._load_dynamic_jobs()
         filtered = [j for j in jobs if j["name"] != name]
@@ -114,6 +144,32 @@ class Scheduler:
                 logger.info("Loaded job: %s (%s, session=%s)", job["name"], job["cron"],
                             job.get("session", "chat"))
 
+    def load_reminders(self) -> None:
+        """Reload persisted reminders that haven't fired yet."""
+        now = datetime.now()
+        reminders = self._load_reminders()
+        surviving = []
+        existing = {j.id for j in self._scheduler.get_jobs()}
+        for r in reminders:
+            run_at = datetime.fromisoformat(r["run_at"])
+            if run_at <= now:
+                logger.info("Discarding expired reminder: %s", r["id"])
+                continue
+            if r["id"] in existing:
+                surviving.append(r)
+                continue
+            self._scheduler.add_job(
+                self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
+                name=f"reminder @ {run_at.strftime('%H:%M')}",
+                kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
+                        "session": r.get("session", "chat")},
+            )
+            surviving.append(r)
+            logger.info("Restored reminder: %s (fires at %s)", r["id"], run_at.strftime('%H:%M'))
+        # Clean up expired entries
+        if len(surviving) != len(reminders):
+            self._save_reminders(surviving)
+
     # -- Public API --
 
     def add_cron_job(self, name: str, prompt: str, cron_expr: str,
@@ -129,12 +185,13 @@ class Scheduler:
         run_at = datetime.now() + delta
         job_id = f"remind_{int(run_at.timestamp())}"
         self._scheduler.add_job(
-            self._run_job, trigger="date", run_date=run_at, id=job_id,
+            self._run_reminder, trigger="date", run_date=run_at, id=job_id,
             name=f"reminder @ {run_at.strftime('%H:%M')}",
-            kwargs={"job_name": "reminder", "prompt": prompt, "working_dir": working_dir,
+            kwargs={"reminder_id": job_id, "prompt": prompt, "working_dir": working_dir,
                     "session": session},
         )
-        logger.info("Added one-shot job: %s (runs at %s)", prompt[:50], run_at)
+        self._append_reminder(job_id, prompt, run_at, session)
+        logger.info("Added one-shot reminder: %s (runs at %s)", prompt[:50], run_at)
         return job_id
 
     def remove_job(self, name: str) -> bool:
@@ -206,3 +263,10 @@ class Scheduler:
                     await asyncio.sleep(2 ** attempt * 5)
         if self._callback:
             await self._callback(job_name, f"Job failed after {max_retries} attempts. Check logs.")
+
+    async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
+                            session: str = "chat") -> None:
+        logger.info("Executing reminder: %s (session=%s)", reminder_id, session)
+        await self._run_job(job_name="reminder", prompt=prompt, working_dir=working_dir, session=session)
+        self._remove_reminder(reminder_id)
+        logger.info("Reminder %s fired and removed from persistence", reminder_id)

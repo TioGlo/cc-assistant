@@ -79,6 +79,7 @@ def main() -> None:
         if config.scheduler.jobs:
             scheduler.seed_config_jobs(config.scheduler.jobs)
         scheduler.load_jobs()
+        scheduler.load_reminders()
         logger.info("Scheduler started")
         await slack_monitor.start()
 
