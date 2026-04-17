@@ -255,6 +255,56 @@ for template in "$SCRIPT_DIR"/hooks/*.template; do
     fi
 done
 
+# 4b. Configure workspace .claude/settings.json (hooks + statusline)
+WORKSPACE_CLAUDE_DIR="$AGENT_ROOT/workspace/.claude"
+WORKSPACE_SETTINGS="$WORKSPACE_CLAUDE_DIR/settings.json"
+if [ ! -f "$WORKSPACE_SETTINGS" ]; then
+    mkdir -p "$WORKSPACE_CLAUDE_DIR"
+    cat > "$WORKSPACE_SETTINGS" <<SETTINGSEOF
+{
+  "statusLine": {
+    "type": "command",
+    "command": "${AGENT_ROOT}/hooks/statusline-usage.sh",
+    "refreshInterval": 30
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${AGENT_ROOT}/hooks/self-improving-activator.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${AGENT_ROOT}/hooks/error-detector.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${AGENT_ROOT}/hooks/reflection-trigger.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+SETTINGSEOF
+    echo "  Created $WORKSPACE_SETTINGS (statusline + self-improving hooks)"
+fi
+
 # 5. Install browser-mcp (ships with cc-assistant)
 echo "[5/8] Installing browser-mcp..."
 BROWSER_MCP_DIR="$SCRIPT_DIR/browser-mcp"

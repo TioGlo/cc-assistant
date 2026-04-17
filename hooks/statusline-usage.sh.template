@@ -1,0 +1,49 @@
+#!/bin/bash
+# Statusline script: captures rate_limits to a shared file and displays usage.
+# Other processes (bot, heartbeat, cron jobs) can read the file.
+
+USAGE_FILE="{{AGENT_ROOT}}/usage-status.json"
+input=$(cat)
+
+# Extract fields
+MODEL=$(echo "$input" | jq -r '.model.display_name // "?"')
+PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
+RATE_LIMITS=$(echo "$input" | jq -c '.rate_limits // empty')
+
+# Write rate_limits + metadata to shared file
+if [ -n "$RATE_LIMITS" ]; then
+  FIVE_HOUR=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // "N/A"')
+  SEVEN_DAY=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // "N/A"')
+  FIVE_RESETS=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // null')
+  SEVEN_RESETS=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // null')
+
+  cat > "$USAGE_FILE" <<EOF
+{
+  "updated_at": "$(date -Iseconds)",
+  "model": "$MODEL",
+  "five_hour_pct": $FIVE_HOUR,
+  "seven_day_pct": $SEVEN_DAY,
+  "five_hour_resets_at": $FIVE_RESETS,
+  "seven_day_resets_at": $SEVEN_RESETS,
+  "context_pct": $PCT
+}
+EOF
+
+  # Color code: green < 60, yellow 60-80, red > 80
+  if [ "$SEVEN_DAY" != "N/A" ]; then
+    SD_INT=${SEVEN_DAY%.*}
+    if [ "$SD_INT" -ge 80 ] 2>/dev/null; then
+      COLOR="\033[31m"  # red
+    elif [ "$SD_INT" -ge 60 ] 2>/dev/null; then
+      COLOR="\033[33m"  # yellow
+    else
+      COLOR="\033[32m"  # green
+    fi
+    RESET="\033[0m"
+    echo -e "5h: ${FIVE_HOUR}% | 7d: ${COLOR}${SEVEN_DAY}%${RESET} | ctx: ${PCT}%"
+  else
+    echo "5h: ${FIVE_HOUR}% | 7d: ${SEVEN_DAY}% | ctx: ${PCT}%"
+  fi
+else
+  echo "[$MODEL] ctx: ${PCT}%"
+fi
