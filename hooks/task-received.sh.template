@@ -1,0 +1,14 @@
+#!/bin/bash
+# UserPromptSubmit hook. Detects dispatched tasks by [TASK:id] marker
+# and writes a receipt file so the dispatcher can distinguish
+# "dispatch never landed" from "agent got the task but didn't finish."
+AGENT_ROOT="{{AGENT_ROOT}}"
+input=$(cat)
+prompt=$(echo "$input" | jq -r '.prompt // empty' 2>/dev/null)
+task_id=$(echo "$prompt" | grep -oP '\[TASK:\K[^]]+' | head -1)
+if [ -n "$task_id" ]; then
+  mkdir -p "$AGENT_ROOT/signals/received"
+  printf '{"task_id":"%s","received_at":"%s"}\n' \
+    "$task_id" "$(date -Iseconds)" \
+    > "$AGENT_ROOT/signals/received/${task_id}.json"
+fi

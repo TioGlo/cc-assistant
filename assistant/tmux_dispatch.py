@@ -189,7 +189,12 @@ class TmuxDispatch:
         task_file.write_text(task_spec)
         logger.info("Dispatching task %s to tmux '%s'", task_id, sess.tmux_session)
 
-        await sess.send_message(f"Read the file {task_file} and follow its instructions exactly.")
+        # [TASK:id] marker lets the task-received.sh and task-stopped.sh hooks
+        # identify dispatches in UserPromptSubmit/Stop events. See plan:
+        # ~/.claude/plans/unified-jumping-noodle.md
+        await sess.send_message(
+            f"[TASK:{task_id}] Read the file {task_file} and follow its instructions exactly."
+        )
 
         sess._active_task = task_id
         sess._watcher_task = asyncio.create_task(
@@ -199,11 +204,33 @@ class TmuxDispatch:
 
     async def _watch_for_completion(self, sess: TmuxSession, task_id: str,
                                      signal_file: Path, result_file: Path, timeout: int) -> None:
+        received_file = self.signal_dir / "received" / f"{task_id}.json"
+        stopped_file = self.signal_dir / "stopped" / f"{task_id}.json"
+        dispatch_landed_deadline = 30  # seconds to wait for task-received hook
+        warned_not_received = False
+
         try:
             elapsed = 0
             while elapsed < timeout:
                 await asyncio.sleep(5)
                 elapsed += 5
+
+                # Check for early "dispatch never landed" failure
+                if not warned_not_received and elapsed >= dispatch_landed_deadline:
+                    if not received_file.exists():
+                        output = await sess.capture_recent_output(lines=10)
+                        msg = (
+                            f"⚠️ Task '{task_id}' dispatch never landed on '{sess.tmux_session}' "
+                            f"(no receipt after {dispatch_landed_deadline}s). "
+                            f"Agent may be at context limit or blocked on a prompt.\n\n"
+                            f"Last pane output:\n```\n{output[-1500:]}\n```"
+                        )
+                        logger.warning("Task %s never received by agent", task_id)
+                        if self._callback:
+                            await self._callback(task_id, msg)
+                        warned_not_received = True
+                        # Keep watching — the user may unblock the TUI and the task still runs
+
                 if signal_file.exists():
                     try:
                         json.loads(signal_file.read_text())
@@ -219,8 +246,24 @@ class TmuxDispatch:
                         await self._callback(task_id, result_text)
                     return
 
-            output = await sess.capture_recent_output(lines=30)
-            msg = f"Task '{task_id}' timed out after {timeout}s.\n\nRecent output:\n{output}"
+            # Timeout. Build diagnostic based on lifecycle state.
+            diagnostic = self._build_timeout_diagnostic(
+                task_id, timeout, received_file, stopped_file,
+            )
+            pane_excerpt = await sess.capture_recent_output(lines=10)
+            # Save full pane to diagnostic file (not shown inline)
+            diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
+            diag_file.write_text(
+                f"Task: {task_id}\nTimeout: {timeout}s\nSession: {sess.tmux_session}\n\n"
+                f"--- Pane capture (last 50 lines) ---\n"
+                f"{await sess.capture_recent_output(lines=50)}\n"
+            )
+            msg = (
+                f"⏱ Task '{task_id}' timed out after {timeout}s.\n"
+                f"{diagnostic}\n\n"
+                f"Last pane lines:\n```\n{pane_excerpt[-800:]}\n```\n"
+                f"Full capture: {diag_file}"
+            )
             if self._callback:
                 await self._callback(task_id, msg)
         except asyncio.CancelledError:
@@ -232,6 +275,25 @@ class TmuxDispatch:
         finally:
             sess._active_task = None
             sess._watcher_task = None
+
+    def _build_timeout_diagnostic(self, task_id: str, timeout: int,
+                                   received_file: Path, stopped_file: Path) -> str:
+        """Compose a short diagnostic based on which lifecycle markers exist."""
+        if not received_file.exists():
+            return "State: dispatch never landed (no receipt hook fired). Agent likely blocked pre-execution."
+        if stopped_file.exists():
+            try:
+                data = json.loads(stopped_file.read_text())
+                summary = data.get("summary", "")[:200]
+                stopped_at = data.get("stopped_at", "unknown")
+                return (
+                    f"State: agent received task and stopped at {stopped_at}, "
+                    f"but never wrote completion signal. Work incomplete.\n"
+                    f"Last assistant message: {summary}"
+                )
+            except (json.JSONDecodeError, OSError):
+                return "State: agent received task and stopped, but stopped file unreadable."
+        return "State: agent received task but is still running (stuck mid-turn, or work exceeded timeout)."
 
     @staticmethod
     def _capture_session_id(sess: TmuxSession) -> None:

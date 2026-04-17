@@ -1,0 +1,52 @@
+#!/bin/bash
+# Stop hook. Walks the transcript back to find the most recent [TASK:id]
+# user message and writes a stopped file with a short summary of the
+# final assistant message. Only writes once per task_id (first stop wins).
+AGENT_ROOT="{{AGENT_ROOT}}"
+input=$(cat)
+transcript=$(echo "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then
+  exit 0
+fi
+
+# Find most recent user message containing a [TASK:id] marker
+task_id=""
+while IFS= read -r line; do
+  user_text=$(echo "$line" | jq -r 'select(.type=="user") | .message.content // empty | if type=="string" then . else .[0].text // empty end' 2>/dev/null)
+  if [ -n "$user_text" ]; then
+    candidate=$(echo "$user_text" | grep -oP '\[TASK:\K[^]]+' | head -1)
+    if [ -n "$candidate" ]; then
+      task_id="$candidate"
+      break
+    fi
+  fi
+done < <(tac "$transcript")
+
+if [ -z "$task_id" ]; then
+  exit 0
+fi
+
+stop_file="$AGENT_ROOT/signals/stopped/${task_id}.json"
+mkdir -p "$AGENT_ROOT/signals/stopped"
+
+# First stop wins — don't overwrite
+if [ -f "$stop_file" ]; then
+  exit 0
+fi
+
+# Capture last assistant text message (truncated to 400 chars) for summary
+last_assistant=""
+while IFS= read -r line; do
+  text=$(echo "$line" | jq -r 'select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text // empty' 2>/dev/null | head -c 400)
+  if [ -n "$text" ]; then
+    last_assistant="$text"
+    break
+  fi
+done < <(tac "$transcript")
+
+jq -n \
+  --arg id "$task_id" \
+  --arg at "$(date -Iseconds)" \
+  --arg summary "$last_assistant" \
+  '{task_id: $id, stopped_at: $at, summary: $summary}' \
+  > "$stop_file"

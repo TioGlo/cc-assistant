@@ -275,6 +275,10 @@ if [ ! -f "$WORKSPACE_SETTINGS" ]; then
           {
             "type": "command",
             "command": "${AGENT_ROOT}/hooks/self-improving-activator.sh"
+          },
+          {
+            "type": "command",
+            "command": "${AGENT_ROOT}/hooks/task-received.sh"
           }
         ]
       }
@@ -298,11 +302,22 @@ if [ ! -f "$WORKSPACE_SETTINGS" ]; then
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${AGENT_ROOT}/hooks/task-stopped.sh"
+          }
+        ]
+      }
     ]
   }
 }
 SETTINGSEOF
-    echo "  Created $WORKSPACE_SETTINGS (statusline + self-improving hooks)"
+    echo "  Created $WORKSPACE_SETTINGS (statusline + self-improving + task lifecycle hooks)"
 fi
 
 # 5. Install browser-mcp (ships with cc-assistant)
