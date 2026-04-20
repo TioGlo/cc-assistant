@@ -1,7 +1,21 @@
 #!/bin/bash
 # Self-improving activator hook.
-# Register as UserPromptSubmit hook in ~/.claude/settings.json.
-# Injects a brief reminder after every user prompt.
-cat <<'EOF'
-[Self-improving] If this interaction involves a correction, error, or new learning, log it to self-improving/corrections.md. If starting non-trivial work, check self-improving/memory.md first.
-EOF
+# Register as UserPromptSubmit hook in .claude/settings.json.
+# Injects the correction reminder AND the contents of memory.md so
+# the agent sees its learned rules on every prompt — not just an
+# instruction to go read a file it will ignore.
+#
+# Resolves memory relative to the session's working directory, so each
+# agent (workspace, sub-agents) reads its own memory.md.
+
+CWD="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+MEMORY="$CWD/self-improving/memory.md"
+
+echo "[Self-improving] If this interaction involves a correction, error, or new learning, log it to self-improving/corrections.md."
+
+if [ -s "$MEMORY" ]; then
+  echo ""
+  echo "[Learned rules from $MEMORY]:"
+  # Skip the header lines (first 3), print only rule content
+  tail -n +4 "$MEMORY" | grep -v '^$' | head -30
+fi
