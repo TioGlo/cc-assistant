@@ -158,7 +158,7 @@ class TmuxDispatch:
         return await self._get_session(name).capture_recent_output(lines)
 
     async def dispatch(self, task_description: str, task_name: str | None = None,
-                       timeout: int = 600, session: str | None = None) -> str:
+                       timeout: int = 1800, session: str | None = None) -> str:
         sess = self._get_session(session)
         await sess.ensure()
 
@@ -204,21 +204,55 @@ class TmuxDispatch:
 
     async def _watch_for_completion(self, sess: TmuxSession, task_id: str,
                                      signal_file: Path, result_file: Path, timeout: int) -> None:
+        """Watch for task completion.
+
+        Timeout is a warning threshold, not a terminal cutoff — we keep
+        watching until the agent either completes or hits hard_limit.
+        This way tasks that take longer than expected still return a
+        real result instead of a false-failure message.
+        """
         received_file = self.signal_dir / "received" / f"{task_id}.json"
         stopped_file = self.signal_dir / "stopped" / f"{task_id}.json"
         dispatch_landed_deadline = 30  # seconds to wait for task-received hook
+        # Absolute ceiling — after this we give up and assume the task is dead.
+        # Generous because long jobs (code builds, content generation, research) can
+        # legitimately run for hours.
+        hard_limit = max(timeout * 4, 4 * 3600)
         warned_not_received = False
+        warned_timeout = False
+        start = time.time()
 
         try:
-            elapsed = 0
-            while elapsed < timeout:
+            while True:
                 await asyncio.sleep(5)
-                elapsed += 5
+                elapsed = int(time.time() - start)
 
-                # Check for early "dispatch never landed" failure
+                # Completion path — always check first so late-completing tasks
+                # get a proper result message even after we warned about timeout.
+                if signal_file.exists():
+                    try:
+                        json.loads(signal_file.read_text())
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    result_text = result_file.read_text() if result_file.exists() else "Task completed."
+                    logger.info("Task %s completed after %ds", task_id, elapsed)
+                    signal_file.unlink(missing_ok=True)
+                    if sess.resume:
+                        self._capture_session_id(sess)
+                    if self._callback:
+                        if warned_timeout:
+                            # User already got a "taking longer" message; frame the completion
+                            # as a late success so they know it's done.
+                            mins = elapsed // 60
+                            prefix = f"✅ Task '{task_id}' completed after {mins}m (past {timeout}s timeout).\n\n"
+                            await self._callback(task_id, prefix + result_text)
+                        else:
+                            await self._callback(task_id, result_text)
+                    return
+
+                # Early "dispatch never landed" warning
                 if not warned_not_received and elapsed >= dispatch_landed_deadline:
                     if not received_file.exists():
-                        # Save full pane to diagnostic file — don't dump to Telegram
                         diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
                         diag_file.write_text(
                             f"Task: {task_id}\n"
@@ -239,39 +273,48 @@ class TmuxDispatch:
                         warned_not_received = True
                         # Keep watching — the user may unblock the TUI and the task still runs
 
-                if signal_file.exists():
-                    try:
-                        json.loads(signal_file.read_text())
-                    except (json.JSONDecodeError, OSError):
-                        continue
-                    result_text = result_file.read_text() if result_file.exists() else "Task completed."
-                    logger.info("Task %s completed after %ds", task_id, elapsed)
-                    signal_file.unlink(missing_ok=True)
-                    # Capture Claude session ID for future --resume
-                    if sess.resume:
-                        self._capture_session_id(sess)
+                # Soft timeout — warn, then keep watching
+                if not warned_timeout and elapsed >= timeout:
+                    diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
+                    diag_file.write_text(
+                        f"Task: {task_id}\nTimeout: {timeout}s\nSession: {sess.tmux_session}\n\n"
+                        f"--- Pane capture (last 50 lines) ---\n"
+                        f"{await sess.capture_recent_output(lines=50)}\n"
+                    )
+                    diagnostic = self._build_timeout_diagnostic(
+                        task_id, timeout, received_file, stopped_file,
+                    )
+                    msg = (
+                        f"⏳ Task '{task_id}' still running past {timeout}s timeout.\n"
+                        f"{diagnostic}\n"
+                        f"Watching for up to {hard_limit // 60}m total. Will notify on completion.\n"
+                        f"Current pane: {diag_file}"
+                    )
+                    logger.info("Task %s past soft timeout, continuing to watch", task_id)
                     if self._callback:
-                        await self._callback(task_id, result_text)
-                    return
+                        await self._callback(task_id, msg)
+                    warned_timeout = True
 
-            # Timeout. Build diagnostic based on lifecycle state.
-            diagnostic = self._build_timeout_diagnostic(
-                task_id, timeout, received_file, stopped_file,
-            )
-            # Save full pane to diagnostic file — don't dump to Telegram
-            diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
-            diag_file.write_text(
-                f"Task: {task_id}\nTimeout: {timeout}s\nSession: {sess.tmux_session}\n\n"
-                f"--- Pane capture (last 50 lines) ---\n"
-                f"{await sess.capture_recent_output(lines=50)}\n"
-            )
-            msg = (
-                f"⏱ Task '{task_id}' timed out after {timeout}s.\n"
-                f"{diagnostic}\n"
-                f"Full capture: {diag_file}"
-            )
-            if self._callback:
-                await self._callback(task_id, msg)
+                # Hard limit — give up
+                if elapsed >= hard_limit:
+                    diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
+                    diag_file.write_text(
+                        f"Task: {task_id}\nHard limit: {hard_limit}s\nSession: {sess.tmux_session}\n\n"
+                        f"--- Pane capture (last 50 lines) ---\n"
+                        f"{await sess.capture_recent_output(lines=50)}\n"
+                    )
+                    diagnostic = self._build_timeout_diagnostic(
+                        task_id, hard_limit, received_file, stopped_file,
+                    )
+                    msg = (
+                        f"⏱ Task '{task_id}' hit hard limit of {hard_limit // 60}m without completing.\n"
+                        f"{diagnostic}\n"
+                        f"Giving up on this watcher. Full capture: {diag_file}"
+                    )
+                    logger.warning("Task %s hit hard limit %ds", task_id, hard_limit)
+                    if self._callback:
+                        await self._callback(task_id, msg)
+                    return
         except asyncio.CancelledError:
             pass
         except Exception as e:
