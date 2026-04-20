@@ -11,6 +11,37 @@ from slack_sdk.socket_mode.response import SocketModeResponse
 
 logger = logging.getLogger(__name__)
 
+
+class _SlackShutdownNoiseFilter(logging.Filter):
+    """Suppress slack-sdk's event-loop-closed errors emitted during shutdown.
+
+    When the service is stopping, slack-sdk's background tasks keep trying
+    to use a queue bound to the old event loop and log a blizzard of
+    RuntimeError tracebacks. Those errors are harmless but flood the
+    journal and can cause TimeoutStopSec to fire because log flushing
+    takes so long. This filter drops only those specific errors.
+    """
+    _SIGNATURES = (
+        "is bound to a different event loop",
+        "Event loop is closed",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if any(sig in msg for sig in self._SIGNATURES):
+            return False
+        # Also suppress the follow-up exc_info spam that mentions these errors
+        if record.exc_info:
+            exc_msg = str(record.exc_info[1]) if record.exc_info[1] else ""
+            if any(sig in exc_msg for sig in self._SIGNATURES):
+                return False
+        return True
+
+
+# Install the filter once at import time on the noisy slack-sdk logger.
+logging.getLogger("slack_sdk.socket_mode.aiohttp").addFilter(_SlackShutdownNoiseFilter())
+logging.getLogger("slack_sdk.socket_mode.async_client").addFilter(_SlackShutdownNoiseFilter())
+
 # Type for callback that processes batched messages
 TriageCallback = Callable[[str], Awaitable[None]]  # (triage_prompt) -> None
 
@@ -78,11 +109,19 @@ class SlackMonitor:
         self._running = False
         if self._triage_task:
             self._triage_task.cancel()
-        if self.socket_client:
             try:
-                await self.socket_client.disconnect()
-            except Exception as e:
-                logger.debug("Slack disconnect error (expected during shutdown): %s", e)
+                await asyncio.wait_for(self._triage_task, timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if self.socket_client:
+            # Try close() first if available (cleaner, stops background tasks).
+            # Fall back to disconnect(). Both wrapped in a short timeout to
+            # ensure the service doesn't hit TimeoutStopSec.
+            closer = getattr(self.socket_client, "close", None) or self.socket_client.disconnect
+            try:
+                await asyncio.wait_for(closer(), timeout=2.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.debug("Slack shutdown error (expected): %s", type(e).__name__)
         # Flush remaining buffer
         try:
             await self._flush_buffer()
