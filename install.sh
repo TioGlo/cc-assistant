@@ -95,7 +95,7 @@ if [ ! -f "$AGENT_ROOT/workspace/WORKSPACE_REFERENCE.md" ]; then
 fi
 
 # Seed self-improving files
-for f in memory.md corrections.md; do
+for f in memory.md corrections.md SKILL.md; do
     target="$AGENT_ROOT/workspace/self-improving/$f"
     if [ ! -f "$target" ]; then
         cp "$SCRIPT_DIR/templates/shared/self-improving/$f" "$target"
