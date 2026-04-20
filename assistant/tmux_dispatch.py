@@ -218,12 +218,20 @@ class TmuxDispatch:
                 # Check for early "dispatch never landed" failure
                 if not warned_not_received and elapsed >= dispatch_landed_deadline:
                     if not received_file.exists():
-                        output = await sess.capture_recent_output(lines=10)
+                        # Save full pane to diagnostic file — don't dump to Telegram
+                        diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
+                        diag_file.write_text(
+                            f"Task: {task_id}\n"
+                            f"State: dispatch never landed (no receipt after {dispatch_landed_deadline}s)\n"
+                            f"Session: {sess.tmux_session}\n\n"
+                            f"--- Pane capture (last 50 lines) ---\n"
+                            f"{await sess.capture_recent_output(lines=50)}\n"
+                        )
                         msg = (
                             f"⚠️ Task '{task_id}' dispatch never landed on '{sess.tmux_session}' "
                             f"(no receipt after {dispatch_landed_deadline}s). "
-                            f"Agent may be at context limit or blocked on a prompt.\n\n"
-                            f"Last pane output:\n```\n{output[-1500:]}\n```"
+                            f"Agent may be at context limit or blocked on a prompt.\n"
+                            f"Full capture: {diag_file}"
                         )
                         logger.warning("Task %s never received by agent", task_id)
                         if self._callback:
@@ -250,8 +258,7 @@ class TmuxDispatch:
             diagnostic = self._build_timeout_diagnostic(
                 task_id, timeout, received_file, stopped_file,
             )
-            pane_excerpt = await sess.capture_recent_output(lines=10)
-            # Save full pane to diagnostic file (not shown inline)
+            # Save full pane to diagnostic file — don't dump to Telegram
             diag_file = self.signal_dir / f"{task_id}-diagnostic.txt"
             diag_file.write_text(
                 f"Task: {task_id}\nTimeout: {timeout}s\nSession: {sess.tmux_session}\n\n"
@@ -260,8 +267,7 @@ class TmuxDispatch:
             )
             msg = (
                 f"⏱ Task '{task_id}' timed out after {timeout}s.\n"
-                f"{diagnostic}\n\n"
-                f"Last pane lines:\n```\n{pane_excerpt[-800:]}\n```\n"
+                f"{diagnostic}\n"
                 f"Full capture: {diag_file}"
             )
             if self._callback:
