@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.{{AGENT_NAME}}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PROJECT_DIR}}/.venv/bin/python</string>
+        <string>{{PROJECT_DIR}}/main.py</string>
+        <string>--agent-dir</string>
+        <string>{{AGENT_ROOT}}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_DIR}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{HOME}}</string>
+        <key>AGENT_ROOT</key>
+        <string>{{AGENT_ROOT}}</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <!-- Inclusive PATH: Homebrew (Apple Silicon + Intel), user bins, system. -->
+        <key>PATH</key>
+        <string>{{HOME}}/.local/bin:{{HOME}}/bin:{{HOME}}/.bun/bin:{{HOME}}/go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin</string>
+    </dict>
+
+    <!-- Start at user login and restart on unexpected exit. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- launchd analogue to systemd's KillMode=process — children (tmux sessions,
+         dispatched Claude TUIs) keep running when launchd stops the parent. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
+    <!-- Don't hammer-restart on a crash loop (analogue to RestartSec=10). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Logs go to files; tail with `tail -f` from any terminal. -->
+    <key>StandardOutPath</key>
+    <string>{{HOME}}/Library/Logs/{{AGENT_NAME}}.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{HOME}}/Library/Logs/{{AGENT_NAME}}.log</string>
+</dict>
+</plist>

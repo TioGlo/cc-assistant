@@ -6,7 +6,7 @@ Built as an open-source alternative to OpenClaw for Claude Code Max plan users.
 
 ## Prerequisites
 
-- **Linux** with systemd (Ubuntu 22.04+, Fedora 39+, Arch, etc.)
+- **Linux** with systemd (Ubuntu 22.04+, Fedora 39+, Arch, etc.) **or macOS** (12+, with launchd)
 - **Python 3.13+** with [uv](https://docs.astral.sh/uv/) for dependency management
 - **Node.js 18+** with npm (for browser-mcp)
 - **[Claude Code CLI](https://claude.ai/code)** installed and authenticated (`claude auth login`)
@@ -15,6 +15,13 @@ Built as an open-source alternative to OpenClaw for Claude Code Max plan users.
 - **A Telegram bot** — create one via [@BotFather](https://t.me/BotFather)
 - **Your Telegram user ID** — get it from [@userinfobot](https://t.me/userinfobot)
 
+On **macOS** the easiest way to get the toolchain is Homebrew:
+
+```bash
+brew install uv tmux jq node git
+# Claude Code CLI: see https://docs.claude.com/en/docs/claude-code/setup
+```
+
 ## Quick Start
 
 ```bash
@@ -22,10 +29,23 @@ git clone --recursive https://github.com/youruser/cc-assistant.git
 cd cc-assistant
 ./install.sh
 # Edit ~/.assistant/config.yaml with your Telegram bot token and owner ID
-systemctl --user start assistant
 ```
 
+Then start the service:
+
+- **Linux:** `systemctl --user start assistant`
+- **macOS:** the agent is loaded automatically by `launchctl` during install. To start manually: `launchctl kickstart -k gui/$UID/com.assistant`
+
 Your bot should respond to `/start` on Telegram.
+
+### Service management
+
+| Action | Linux (systemd) | macOS (launchd) |
+|--------|-----------------|-----------------|
+| Status | `systemctl --user status assistant` | `launchctl print gui/$UID/com.assistant` |
+| Restart | `systemctl --user restart assistant` | `launchctl kickstart -k gui/$UID/com.assistant` |
+| Stop | `systemctl --user stop assistant` | `launchctl bootout gui/$UID/com.assistant` |
+| Logs | `journalctl --user -u assistant -f` | `tail -f ~/Library/Logs/assistant.log` |
 
 ## Templates
 

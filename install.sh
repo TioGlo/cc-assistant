@@ -3,6 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# OS detection — used at step 8 to pick systemd (Linux) vs launchd (macOS).
+case "$(uname -s)" in
+    Linux*)  OS=linux ;;
+    Darwin*) OS=macos ;;
+    *)       echo "Unsupported OS: $(uname -s). This installer supports Linux and macOS."; exit 1 ;;
+esac
+
 # Parse arguments
 AGENT_ROOT="$HOME/.assistant"
 TEMPLATE="assistant"
@@ -49,10 +56,34 @@ AGENT_NAME="$(basename "$AGENT_ROOT" | sed 's/^\.//')"
 SERVICE_NAME="$AGENT_NAME"
 
 echo "=== ${AGENT_NAME} Install ==="
+echo "OS: $OS"
 echo "Agent root: $AGENT_ROOT"
 echo "Template: $TEMPLATE"
 echo "Service: $SERVICE_NAME"
 echo ""
+
+# Prereq sanity check. Don't auto-install — just tell the user what's missing.
+MISSING=()
+for cmd in uv python3 tmux jq node npm git; do
+    command -v "$cmd" >/dev/null 2>&1 || MISSING+=("$cmd")
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+    echo "Missing prerequisites: ${MISSING[*]}"
+    if [ "$OS" = "macos" ]; then
+        echo ""
+        echo "On macOS, install via Homebrew:"
+        echo "  brew install ${MISSING[*]}"
+        echo ""
+        echo "(uv: https://docs.astral.sh/uv/getting-started/installation/)"
+        echo "(claude: https://docs.claude.com/en/docs/claude-code/setup)"
+    else
+        echo "Install missing tools with your package manager and re-run."
+    fi
+    exit 1
+fi
+if ! command -v claude >/dev/null 2>&1; then
+    echo "Warning: 'claude' CLI not on PATH. Install from https://docs.claude.com/en/docs/claude-code/setup before starting the service."
+fi
 
 # 1. Create directory structure
 echo "[1/6] Creating directory structure..."
@@ -421,17 +452,37 @@ echo "[7/8] Installing Python dependencies..."
 cd "$SCRIPT_DIR"
 uv sync 2>&1 | tail -1
 
-# 8. Install systemd user service
-echo "[8/8] Installing systemd service..."
-mkdir -p "$HOME/.config/systemd/user"
-sed \
-    -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
-    -e "s|{{PROJECT_DIR}}|${SCRIPT_DIR}|g" \
-    -e "s|{{AGENT_NAME}}|${AGENT_NAME}|g" \
-    "$SCRIPT_DIR/systemd/assistant.service.template" \
-    > "$HOME/.config/systemd/user/${SERVICE_NAME}.service"
-systemctl --user daemon-reload
-systemctl --user enable "$SERVICE_NAME"
+# 8. Install user service (systemd on Linux, launchd on macOS)
+if [ "$OS" = "linux" ]; then
+    echo "[8/8] Installing systemd service..."
+    mkdir -p "$HOME/.config/systemd/user"
+    sed \
+        -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
+        -e "s|{{PROJECT_DIR}}|${SCRIPT_DIR}|g" \
+        -e "s|{{AGENT_NAME}}|${AGENT_NAME}|g" \
+        "$SCRIPT_DIR/systemd/assistant.service.template" \
+        > "$HOME/.config/systemd/user/${SERVICE_NAME}.service"
+    systemctl --user daemon-reload
+    systemctl --user enable "$SERVICE_NAME"
+else
+    echo "[8/8] Installing launchd agent..."
+    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$HOME/Library/Logs"
+    PLIST_LABEL="com.${SERVICE_NAME}"
+    PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_LABEL}.plist"
+    sed \
+        -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
+        -e "s|{{PROJECT_DIR}}|${SCRIPT_DIR}|g" \
+        -e "s|{{AGENT_NAME}}|${SERVICE_NAME}|g" \
+        -e "s|{{HOME}}|${HOME}|g" \
+        "$SCRIPT_DIR/launchd/assistant.plist.template" \
+        > "$PLIST_PATH"
+    # Load the agent. `bootstrap gui/$UID` is the modern (10.10+) replacement
+    # for `launchctl load`. Use `bootout` to unload before re-bootstrapping in
+    # case of reinstall.
+    launchctl bootout "gui/$UID/${PLIST_LABEL}" 2>/dev/null || true
+    launchctl bootstrap "gui/$UID" "$PLIST_PATH"
+fi
 
 echo ""
 echo "=== Install complete ==="
@@ -453,11 +504,20 @@ echo "  ├── hooks/                 # Notification and lifecycle hooks"
 echo "  └── pending-approvals/     # Tmux permission approval queue"
 echo ""
 echo "Commands:"
-echo "  systemctl --user start $SERVICE_NAME"
-echo "  systemctl --user stop $SERVICE_NAME"
-echo "  systemctl --user restart $SERVICE_NAME"
-echo "  systemctl --user status $SERVICE_NAME"
-echo "  journalctl --user -u $SERVICE_NAME -f"
+if [ "$OS" = "linux" ]; then
+    echo "  systemctl --user start $SERVICE_NAME"
+    echo "  systemctl --user stop $SERVICE_NAME"
+    echo "  systemctl --user restart $SERVICE_NAME"
+    echo "  systemctl --user status $SERVICE_NAME"
+    echo "  journalctl --user -u $SERVICE_NAME -f"
+else
+    PLIST_LABEL="com.${SERVICE_NAME}"
+    echo "  launchctl kickstart -k gui/\$UID/${PLIST_LABEL}    # restart"
+    echo "  launchctl print gui/\$UID/${PLIST_LABEL}           # status"
+    echo "  launchctl bootout gui/\$UID/${PLIST_LABEL}         # stop + unload"
+    echo "  launchctl bootstrap gui/\$UID ~/Library/LaunchAgents/${PLIST_LABEL}.plist  # load + start"
+    echo "  tail -f ~/Library/Logs/${SERVICE_NAME}.log         # logs"
+fi
 echo ""
 
 if grep -q "YOUR_BOT_TOKEN" "$AGENT_ROOT/config.yaml" 2>/dev/null; then
