@@ -25,7 +25,7 @@ brew install uv tmux jq node git
 ## Quick Start
 
 ```bash
-git clone --recursive https://github.com/youruser/cc-assistant.git
+git clone --recursive https://github.com/TioGlo/cc-assistant.git
 cd cc-assistant
 ./install.sh
 # Edit ~/.assistant/config.yaml with your Telegram bot token and owner ID
