@@ -450,7 +450,33 @@ fi
 # 7. Install Python dependencies
 echo "[7/8] Installing Python dependencies..."
 cd "$SCRIPT_DIR"
-uv sync 2>&1 | tail -1
+
+# Detect whether voice is enabled in config and install the voice extra.
+VOICE_ENABLED=false
+if [ -f "$AGENT_ROOT/config.yaml" ] && grep -qE "^[[:space:]]*enabled:[[:space:]]*true" \
+        <(awk '/^voice:/{f=1} f' "$AGENT_ROOT/config.yaml"); then
+    VOICE_ENABLED=true
+fi
+
+if [ "$VOICE_ENABLED" = true ]; then
+    echo "  voice enabled — installing with --extra voice"
+    uv sync --extra voice 2>&1 | tail -1
+else
+    uv sync 2>&1 | tail -1
+fi
+
+# 7b. Pre-download the faster-whisper model so the first voice message
+#     doesn't pay a 150MB download cost.
+if [ "$VOICE_ENABLED" = true ]; then
+    VOICE_MODEL=$(awk '/^voice:/{f=1} f && /^[[:space:]]*model:/{print $2; exit}' "$AGENT_ROOT/config.yaml" | tr -d '"' )
+    VOICE_MODEL=${VOICE_MODEL:-base.en}
+    echo "  pre-downloading faster-whisper model: $VOICE_MODEL"
+    "$SCRIPT_DIR/.venv/bin/python" -c "
+from faster_whisper import WhisperModel
+WhisperModel('$VOICE_MODEL', compute_type='int8', device='cpu')
+print('  model cached')
+" 2>&1 | tail -2 || echo "  (model pre-download skipped — first voice message will trigger it)"
+fi
 
 # 8. Install user service (systemd on Linux, launchd on macOS)
 if [ "$OS" = "linux" ]; then

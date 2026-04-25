@@ -82,6 +82,7 @@ def main() -> None:
         scheduler.load_reminders()
         logger.info("Scheduler started")
         await slack_monitor.start()
+        await bot.warmup_voice()
 
     async def post_shutdown(application) -> None:
         await slack_monitor.stop()

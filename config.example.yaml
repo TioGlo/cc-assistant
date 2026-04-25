@@ -80,3 +80,29 @@ scheduler:
   #   prompt: "Check AI news sources and summarize what's new."
   #   cron: "0 7 * * *"
   #   session: "research"      # optional: isolate this job's context from the main chat
+
+# Voice input (Phase 1 — transcription of Telegram voice messages).
+# Install: uv sync --extra voice    (pulls faster-whisper)
+# Engines are pluggable — see assistant/voice/engines/ for examples and to add new ones.
+voice:
+  enabled: false               # toggle voice handling on/off
+  engine: faster_whisper       # registry name; available: faster_whisper, whisper_cpp, openai_api
+  model: base.en               # engine-specific model identifier
+  language: en                 # ISO code; null for auto-detect
+  engine_options:
+    compute_type: int8         # faster-whisper: int8 | int8_float16 | float16 | float32
+    device: cpu                # 'cpu' (recommended) or 'cuda'
+
+  # Examples for other engines:
+  #
+  # engine: whisper_cpp
+  # model: base.en
+  # engine_options:
+  #   model_path: /opt/homebrew/share/whisper-cpp/ggml-base.en.bin   # REQUIRED
+  #   binary: whisper-cli                                            # optional override
+  #   threads: 4
+  #
+  # engine: openai_api
+  # model: whisper-1
+  # engine_options:
+  #   api_key: ${OPENAI_API_KEY}

@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import logging
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,7 @@ from .formatter import (
 from .scheduler import Scheduler
 from .session import SessionManager
 from .tmux_dispatch import TmuxDispatch
+from .voice import TranscriptionEngine, get_engine
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,16 @@ class AssistantBot:
         self.tmux = TmuxDispatch(config.cc_agents or None)
         self._start_time = time.time()
         self.app: Application | None = None
+        self.voice_engine: TranscriptionEngine | None = None
+        if config.voice.enabled:
+            try:
+                self.voice_engine = get_engine(config.voice)
+                logger.info(
+                    "Voice engine: %s (model=%s)",
+                    config.voice.engine, config.voice.model,
+                )
+            except Exception:
+                logger.exception("Voice engine init failed; voice disabled")
 
     def _is_owner(self, update: Update) -> bool:
         user = update.effective_user
@@ -349,6 +361,49 @@ class AssistantBot:
         finally:
             typing_task.cancel()
 
+    async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Transcribe a Telegram voice note and route the text through handle_message."""
+        if not self._is_owner(update):
+            return
+        voice = update.message.voice
+        if voice is None:
+            return
+        if self.voice_engine is None:
+            await update.message.reply_text(
+                "Voice messages aren't enabled. Set `voice.enabled: true` in config.yaml."
+            )
+            return
+
+        chat_id = update.effective_chat.id
+        await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        # Telegram voice notes are OGG/Opus
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            audio_path = Path(tmp.name)
+        try:
+            file = await context.bot.get_file(voice.file_id)
+            await file.download_to_drive(audio_path)
+            result = await self.voice_engine.transcribe(
+                audio_path, language=self.config.voice.language,
+            )
+        except Exception as e:
+            logger.exception("Voice transcription failed")
+            await update.message.reply_text(f"Couldn't transcribe that — {e}")
+            return
+        finally:
+            audio_path.unlink(missing_ok=True)
+
+        transcript = (result.text or "").strip()
+        if not transcript:
+            await update.message.reply_text("(empty transcription)")
+            return
+
+        # Prefix the text with [voice] so the LLM knows the input channel.
+        # Phase 2 will use this signal to decide when to reply with voice.
+        update.message.text = f"[voice] {transcript}"
+        logger.info("Voice transcribed (%.1fs): %s", result.duration_seconds or 0, transcript[:80])
+        await self.handle_message(update, context)
+
     def _process_commands(self, text: str) -> None:
         for cmd in extract_schedule_commands(text):
             self.scheduler.add_cron_job(cmd.name, cmd.prompt, cmd.cron, cmd.working_dir)
@@ -444,7 +499,22 @@ class AssistantBot:
         # Load user modules (before catch-all message handler)
         self._load_modules()
 
+        # Voice messages — transcribed and routed through handle_message
+        self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice_message))
+
         # Catch-all for regular messages
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         return self.app
+
+    async def warmup_voice(self) -> None:
+        """Eager-load the voice model so the first message isn't laggy.
+
+        Called by main.py after the application starts.
+        """
+        if self.voice_engine is None:
+            return
+        try:
+            await self.voice_engine.warmup()
+        except Exception:
+            logger.exception("Voice warmup failed; first transcription may be slow")

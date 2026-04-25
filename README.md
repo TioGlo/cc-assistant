@@ -94,6 +94,27 @@ Each agent needs its own Telegram bot (create via @BotFather).
 
 **Optional add-ons (interactive prompt during install):**
 - **Google Workspace** — Gmail, Calendar, Drive access via MCP. Requires a Google Cloud project with OAuth credentials. The installer adds it to the coding agent's `.mcp.json` and prints post-install steps.
+- **Voice input** — Speak to the bot via Telegram voice messages. Local transcription via Whisper-class models. Pluggable engine architecture (faster-whisper / whisper.cpp / OpenAI API). See [Voice Input](#voice-input) below.
+
+### Voice Input
+
+Send a Telegram voice note → the bot transcribes it locally → routes the text through the normal message flow. Audio never leaves the box (with local engines).
+
+**Enable:** set `voice.enabled: true` in `config.yaml`, then `uv sync --extra voice` (the installer does this automatically if voice is enabled when you run it).
+
+**Engines.** All three ship as working examples; pick one in `config.yaml` and the others stay dormant.
+
+| Engine | Type | Best for |
+|--------|------|----------|
+| `faster_whisper` | Python lib (default) | First-time install, CPU, no extra binary needed |
+| `whisper_cpp` | Subprocess to `whisper-cli` | Vulkan/Metal/CUDA acceleration, no Python ML stack |
+| `openai_api` | HTTP to OpenAI | Trivial setup; audio leaves the box; pay-per-use |
+
+**Adding a new engine** is one file at `assistant/voice/engines/<name>.py` with a `@register_engine("<name>")` class implementing the `TranscriptionEngine` protocol. No central edit, no config schema change — engine-specific options live in `voice.engine_options`.
+
+**Latency.** ~5–8s end-to-end for a 30s clip with `faster_whisper` `base.en` int8 on CPU. The bot shows "typing…" immediately so the wait is visible. The model eager-loads at startup; first message isn't slower than subsequent ones.
+
+**Privacy.** With `faster_whisper` or `whisper_cpp`, audio is processed locally and never sent to a third party. With `openai_api`, audio goes to OpenAI per their terms.
 
 ### Chrome Setup
 

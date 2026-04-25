@@ -3,6 +3,8 @@ from pathlib import Path
 
 import yaml
 
+from .voice import VoiceConfig
+
 
 @dataclass
 class TelegramConfig:
@@ -65,6 +67,7 @@ class Config:
     claude: ClaudeConfig
     scheduler: SchedulerConfig
     slack: SlackConfig
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     cc_agents: list[CCAgent] = field(default_factory=list)
 
     @property
@@ -89,8 +92,10 @@ def load_config(path: str | Path) -> Config:
 
     slack = SlackConfig(**raw.get("slack", {}))
 
+    voice = VoiceConfig(**raw.get("voice", {}))
+
     agents_raw = raw.get("cc_agents", [])
     cc_agents = [CCAgent(**a) for a in agents_raw]
 
     return Config(telegram=telegram, claude=claude, scheduler=scheduler,
-                  slack=slack, cc_agents=cc_agents)
+                  slack=slack, voice=voice, cc_agents=cc_agents)
