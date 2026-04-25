@@ -2,10 +2,12 @@
 # Statusline script: captures rate_limits to a shared file and displays usage.
 # Other processes (bot, heartbeat, cron jobs) can read the file.
 #
-# NOTE: As of ~April 2026 Anthropic silently repurposed the `seven_day`
-# rate_limits field to be a rolling 24-hour window. The JSON schema still
-# calls it `seven_day`, but `resets_at` is 24h out, not 7d. We label it "24h"
-# everywhere the human sees it and in the downstream JSON keys.
+# Anthropic has repeatedly changed the meaning of the rolling-window
+# rate_limits field (5h/7d in early 2026, 5h/24h mid-April, back to 5h/7d
+# late April). Rather than chase the field name, we derive the label from
+# `resets_at` itself — the time-until-reset is a reliable proxy for the
+# window length, and reads correctly no matter what Anthropic calls the
+# field next month.
 
 USAGE_FILE="$HOME/.assistant/usage-status.json"
 input=$(cat)
@@ -15,41 +17,65 @@ MODEL=$(echo "$input" | jq -r '.model.display_name // "?"')
 PCT=$(echo "$input" | jq -r '.context_window.used_percentage // 0' | cut -d. -f1)
 RATE_LIMITS=$(echo "$input" | jq -c '.rate_limits // empty')
 
-# Write rate_limits + metadata to shared file
+# Pick the window label from a future-resets_at delta. This is robust to
+# Anthropic renaming the JSON key or repurposing it again.
+window_label() {
+  local resets_at="$1"
+  if [ -z "$resets_at" ] || [ "$resets_at" = "null" ]; then
+    echo "?"
+    return
+  fi
+  local now seconds
+  now=$(date +%s)
+  seconds=$((resets_at - now))
+  if [ "$seconds" -le 0 ]; then
+    echo "?"
+  elif [ "$seconds" -lt 43200 ]; then        # < 12h → label by hours remaining
+    echo "$((seconds / 3600))h"
+  elif [ "$seconds" -lt 129600 ]; then       # 12-36h → 24h window
+    echo "24h"
+  else                                       # ≥ 36h → days, rounded
+    echo "$(( (seconds + 43200) / 86400 ))d"
+  fi
+}
+
 if [ -n "$RATE_LIMITS" ]; then
   FIVE_HOUR=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // "N/A"')
-  # Anthropic still emits this as `seven_day` but the window is 24h.
-  # Try the plausible new key names too, in case they rename it later.
-  DAILY=$(echo "$input" | jq -r '.rate_limits.twenty_four_hour.used_percentage // .rate_limits.one_day.used_percentage // .rate_limits.daily.used_percentage // .rate_limits.seven_day.used_percentage // "N/A"')
+  # Cycle through the plausible names Anthropic has used or might use for
+  # the longer-window field. First match wins.
+  LONG=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // .rate_limits.twenty_four_hour.used_percentage // .rate_limits.one_day.used_percentage // .rate_limits.daily.used_percentage // .rate_limits.weekly.used_percentage // "N/A"')
   FIVE_RESETS=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // null')
-  DAILY_RESETS=$(echo "$input" | jq -r '.rate_limits.twenty_four_hour.resets_at // .rate_limits.one_day.resets_at // .rate_limits.daily.resets_at // .rate_limits.seven_day.resets_at // null')
+  LONG_RESETS=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // .rate_limits.twenty_four_hour.resets_at // .rate_limits.one_day.resets_at // .rate_limits.daily.resets_at // .rate_limits.weekly.resets_at // null')
+
+  LONG_LABEL=$(window_label "$LONG_RESETS")
 
   cat > "$USAGE_FILE" <<EOF
 {
   "updated_at": "$(date -Iseconds)",
   "model": "$MODEL",
   "five_hour_pct": $FIVE_HOUR,
-  "twenty_four_hour_pct": $DAILY,
+  "long_window_pct": $LONG,
+  "long_window_label": "$LONG_LABEL",
   "five_hour_resets_at": $FIVE_RESETS,
-  "twenty_four_hour_resets_at": $DAILY_RESETS,
+  "long_window_resets_at": $LONG_RESETS,
   "context_pct": $PCT
 }
 EOF
 
-  # Color code on the 24h window: green < 60, yellow 60-80, red > 80
-  if [ "$DAILY" != "N/A" ]; then
-    D_INT=${DAILY%.*}
-    if [ "$D_INT" -ge 80 ] 2>/dev/null; then
-      COLOR="\033[31m"  # red
-    elif [ "$D_INT" -ge 60 ] 2>/dev/null; then
-      COLOR="\033[33m"  # yellow
+  # Color the long-window number: green < 60, yellow 60-80, red > 80
+  if [ "$LONG" != "N/A" ]; then
+    L_INT=${LONG%.*}
+    if [ "$L_INT" -ge 80 ] 2>/dev/null; then
+      COLOR="\033[31m"
+    elif [ "$L_INT" -ge 60 ] 2>/dev/null; then
+      COLOR="\033[33m"
     else
-      COLOR="\033[32m"  # green
+      COLOR="\033[32m"
     fi
     RESET="\033[0m"
-    echo -e "5h: ${FIVE_HOUR}% | 24h: ${COLOR}${DAILY}%${RESET} | ctx: ${PCT}%"
+    echo -e "5h: ${FIVE_HOUR}% | ${LONG_LABEL}: ${COLOR}${LONG}%${RESET} | ctx: ${PCT}%"
   else
-    echo "5h: ${FIVE_HOUR}% | 24h: ${DAILY}% | ctx: ${PCT}%"
+    echo "5h: ${FIVE_HOUR}% | ${LONG_LABEL}: ${LONG}% | ctx: ${PCT}%"
   fi
 else
   echo "[$MODEL] ctx: ${PCT}%"
