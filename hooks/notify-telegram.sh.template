@@ -33,10 +33,19 @@ case "$TYPE" in
   permission_prompt)
     TMUX_SESSION="${AGENT_NAME}-code"
     if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
+      # Brief settle so we don't capture before Claude finishes drawing the prompt.
+      sleep 0.4
       PANE_CONTENT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -20 2>/dev/null)
       QUESTION=$(echo "$PANE_CONTENT" | grep "Do you want to" | tail -1)
       COMMAND=$(echo "$PANE_CONTENT" | grep -A1 "Bash command\|command:" | tail -1 | sed 's/^[[:space:]]*//')
       HAS_PERSISTENT=$(echo "$PANE_CONTENT" | grep -c "don't ask again")
+
+      # If we can't see an actual prompt, this is a stale or auto-resolved
+      # notification (common under --dangerously-skip-permissions). Suppress
+      # rather than wake the user for a non-decision.
+      if [ -z "$QUESTION" ] && [ -z "$COMMAND" ]; then
+        exit 0
+      fi
 
       APPROVAL_ID="approval-$(date +%s)"
       cat > "$PENDING_DIR/${APPROVAL_ID}.json" <<EOF
