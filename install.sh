@@ -356,8 +356,11 @@ echo "[5/8] Installing browser-mcp..."
 BROWSER_MCP_DIR="$SCRIPT_DIR/browser-mcp"
 if [ -d "$BROWSER_MCP_DIR" ] && [ -f "$BROWSER_MCP_DIR/package.json" ]; then
     (cd "$BROWSER_MCP_DIR" && npm install --silent && npm run build --silent) 2>&1 | tail -1
-    # Wire up workspace agent's .mcp.json
+    # Per-agent isolated Chrome: each agent gets its own profile + port + autolaunch.
+    # Default isolated; share by pointing two agents at the same CHROME_PROFILE_DIR.
     WORKSPACE_MCP="$AGENT_ROOT/workspace/.mcp.json"
+    WORKSPACE_PROFILE="$AGENT_ROOT/workspace/chrome-profile"
+    WORKSPACE_PORT=9222
     if [ ! -f "$WORKSPACE_MCP" ]; then
         cat > "$WORKSPACE_MCP" <<MCPEOF
 {
@@ -366,13 +369,15 @@ if [ -d "$BROWSER_MCP_DIR" ] && [ -f "$BROWSER_MCP_DIR/package.json" ]; then
       "command": "node",
       "args": ["$BROWSER_MCP_DIR/dist/index.js"],
       "env": {
-        "CDP_URL": "http://localhost:9222"
+        "CHROME_PORT": "$WORKSPACE_PORT",
+        "CHROME_PROFILE_DIR": "$WORKSPACE_PROFILE",
+        "CHROME_AUTOLAUNCH": "true"
       }
     }
   }
 }
 MCPEOF
-        echo "  browser-mcp configured in $WORKSPACE_MCP"
+        echo "  browser-mcp configured in $WORKSPACE_MCP (port $WORKSPACE_PORT, profile $WORKSPACE_PROFILE)"
     else
         echo "  $WORKSPACE_MCP already exists, skipping"
     fi
