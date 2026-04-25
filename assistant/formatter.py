@@ -99,4 +99,7 @@ def strip_commands(text: str) -> str:
     text = SCHEDULE_PATTERN.sub("", text)
     text = REMIND_PATTERN.sub("", text)
     text = DELEGATE_PATTERN.sub("", text)
+    # Collapse runs of 3+ newlines (left behind when commands are stripped)
+    # down to a single blank line.
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
