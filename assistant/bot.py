@@ -331,6 +331,14 @@ class AssistantBot:
         text = update.message.text
         if not text:
             return
+        await self._process_user_text(text, update)
+
+    async def _process_user_text(self, text: str, update: Update) -> None:
+        """Run text through the LLM, send the reply, process commands/delegations.
+
+        Shared by handle_message and handle_voice_message — Telegram Message
+        objects are immutable so we route text directly instead of mutating.
+        """
         chat_id = update.effective_chat.id
         typing_task = asyncio.create_task(self._keep_typing(chat_id))
         try:
@@ -400,9 +408,11 @@ class AssistantBot:
 
         # Prefix the text with [voice] so the LLM knows the input channel.
         # Phase 2 will use this signal to decide when to reply with voice.
-        update.message.text = f"[voice] {transcript}"
+        # Note: Telegram Message.text is read-only, so we pass the text
+        # directly into _process_user_text rather than mutating the message.
+        prompt = f"[voice] {transcript}"
         logger.info("Voice transcribed (%.1fs): %s", result.duration_seconds or 0, transcript[:80])
-        await self.handle_message(update, context)
+        await self._process_user_text(prompt, update)
 
     def _process_commands(self, text: str) -> None:
         for cmd in extract_schedule_commands(text):
