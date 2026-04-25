@@ -18,6 +18,29 @@ logger = logging.getLogger(__name__)
 DELAY_PATTERN = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 DELAY_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 
+# Standard cron uses 0=Sun, 1=Mon, ..., 6=Sat (and 7=Sun for legacy).
+# APScheduler's CronTrigger uses 0=Mon, ..., 6=Sun — incompatible. We translate
+# digits in the day-of-week field to unambiguous day-name abbreviations so that
+# the meaning is preserved no matter which convention APScheduler interprets.
+_CRON_DOW_NAMES = {
+    "0": "sun", "1": "mon", "2": "tue", "3": "wed",
+    "4": "thu", "5": "fri", "6": "sat", "7": "sun",
+}
+
+
+def _translate_dow(field: str) -> str:
+    """Convert standard-cron DoW digits to day-name abbreviations.
+
+    Preserves *, ranges, lists, steps. Already-named tokens (mon, tue) pass
+    through unchanged. Examples:
+        '6'         -> 'sat'
+        '1,2,4,5'   -> 'mon,tue,thu,fri'
+        '1-5'       -> 'mon-fri'
+        '*'         -> '*'
+        'mon-fri'   -> 'mon-fri'
+    """
+    return re.sub(r"\b[0-7]\b", lambda m: _CRON_DOW_NAMES[m.group(0)], field)
+
 JobCallback = Callable[[str, str], Awaitable[None]]
 
 
@@ -228,8 +251,10 @@ class Scheduler:
         parts = cron_expr.strip().split()
         if len(parts) == 5:
             trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2],
-                                  month=parts[3], day_of_week=parts[4])
+                                  month=parts[3],
+                                  day_of_week=_translate_dow(parts[4]))
         else:
+            # 6+ field forms aren't standard cron — pass through as-is.
             trigger = CronTrigger.from_crontab(cron_expr)
         self._scheduler.add_job(
             self._run_job, trigger=trigger, id=job_id, name=name, replace_existing=True,
