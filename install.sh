@@ -381,7 +381,15 @@ MCPEOF
     else
         echo "  $WORKSPACE_MCP already exists, skipping"
     fi
-    echo "  Note: Chrome must be running with --remote-debugging-port=9222"
+    # Make sure the chrome-profile dir is invisible to Claude's file listings
+    # and to git. The autolaunched Chrome stores cookies/cache here and the
+    # contents are pure noise in agent context.
+    for ignore in "$AGENT_ROOT/workspace/.claudeignore" "$AGENT_ROOT/workspace/.gitignore"; do
+        if [ ! -f "$ignore" ] || ! grep -qxF "chrome-profile/" "$ignore"; then
+            echo "chrome-profile/" >> "$ignore"
+        fi
+    done
+    echo "  Note: browser-mcp will autolaunch Chrome on port $WORKSPACE_PORT on first call."
 else
     echo "  browser-mcp submodule not found — run: git submodule update --init"
 fi
