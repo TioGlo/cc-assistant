@@ -28,6 +28,7 @@ class TmuxSession:
         self._active_task: str | None = None
         self._watcher_task: asyncio.Task | None = None
         self.resume = agent.resume
+        self.model = agent.model
         self._session_file = paths.signals_dir() / f"tmux-session-{self.name}.json"
 
     def _load_claude_session_id(self) -> str | None:
@@ -72,6 +73,8 @@ class TmuxSession:
         await asyncio.sleep(1)
         # Build claude command with --resume if enabled and we have a prior session
         claude_cmd = f"claude --{self.permission_mode}"
+        if self.model:
+            claude_cmd += f" --model {self.model}"
         if self.resume:
             session_id = self._load_claude_session_id()
             if session_id:

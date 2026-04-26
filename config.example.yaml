@@ -57,6 +57,7 @@ cc_agents:
     working_dir: "{{AGENT_ROOT}}/workspace"
     # permission_mode: "dangerously-skip-permissions"  # default
     # resume: true          # resume prior Claude session on tmux recreation (default: true)
+    # model: "sonnet"       # passed as `claude --model <model>`; empty = inherit Claude Code default
   # Additional agents (add as needed):
   # - name: "{{AGENT_NAME}}-code"
   #   tmux_session: "{{AGENT_NAME}}-code"
@@ -65,6 +66,7 @@ cc_agents:
   #   tmux_session: "research"
   #   working_dir: "{{AGENT_ROOT}}/research"
   #   resume: false          # start fresh every time
+  #   model: "sonnet"        # use a cheaper model for high-volume background work
 
 scheduler:
   # Seed jobs — merged into scheduler-jobs.json on first run, then managed dynamically.
