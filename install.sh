@@ -381,13 +381,15 @@ MCPEOF
     else
         echo "  $WORKSPACE_MCP already exists, skipping"
     fi
-    # Make sure the chrome-profile dir is invisible to Claude's file listings
-    # and to git. The autolaunched Chrome stores cookies/cache here and the
-    # contents are pure noise in agent context.
+    # Hide build/runtime cruft from Claude's file listings and from git.
+    # chrome-profile (cookies + caches), .venv (Python deps, easily multi-GB),
+    # __pycache__, and node_modules are all pure noise in agent context.
     for ignore in "$AGENT_ROOT/workspace/.claudeignore" "$AGENT_ROOT/workspace/.gitignore"; do
-        if [ ! -f "$ignore" ] || ! grep -qxF "chrome-profile/" "$ignore"; then
-            echo "chrome-profile/" >> "$ignore"
-        fi
+        for pattern in "chrome-profile/" ".venv/" "__pycache__/" "node_modules/"; do
+            if [ ! -f "$ignore" ] || ! grep -qxF "$pattern" "$ignore"; then
+                echo "$pattern" >> "$ignore"
+            fi
+        done
     done
     echo "  Note: browser-mcp will autolaunch Chrome on port $WORKSPACE_PORT on first call."
 else
