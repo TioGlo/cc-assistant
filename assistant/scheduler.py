@@ -8,6 +8,7 @@ from typing import Callable, Awaitable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .bridge import ClaudeBridge
 from .config import ScheduledJob
@@ -17,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 DELAY_PATTERN = re.compile(r"^(\d+)\s*([smhd])$", re.IGNORECASE)
 DELAY_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+
+# Interval expressions like "55m", "2h", "30s", "1d". Reuses DELAY_PATTERN.
+INTERVAL_PATTERN = DELAY_PATTERN
+
+
+def _parse_interval(expr: str) -> dict:
+    """Parse '55m' / '2h' / '30s' / '1d' into kwargs for IntervalTrigger."""
+    m = INTERVAL_PATTERN.match(expr.strip())
+    if not m:
+        raise ValueError(
+            f"Invalid interval expression: {expr!r}. Use formats like '55m', '2h', '30s'."
+        )
+    return {DELAY_UNITS[m.group(2).lower()]: int(m.group(1))}
 
 # Standard cron uses 0=Sun, 1=Mon, ..., 6=Sat (and 7=Sun for legacy).
 # APScheduler's CronTrigger uses 0=Mon, ..., 6=Sun — incompatible. We translate
@@ -88,12 +102,17 @@ class Scheduler:
         self._jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self._jobs_file.write_text(json.dumps(jobs, indent=2))
 
-    def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str,
-                            working_dir: str | None = None, session: str = "chat") -> None:
+    def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str | None,
+                            working_dir: str | None = None, session: str = "chat",
+                            interval_expr: str | None = None) -> None:
         jobs = self._load_dynamic_jobs()
         jobs = [j for j in jobs if j["name"] != name]
-        entry = {"name": name, "prompt": prompt, "cron": cron_expr,
+        entry = {"name": name, "prompt": prompt,
                  "working_dir": working_dir, "created_at": datetime.now().isoformat()}
+        if cron_expr:
+            entry["cron"] = cron_expr
+        if interval_expr:
+            entry["interval"] = interval_expr
         if session != "chat":
             entry["session"] = session
         jobs.append(entry)
@@ -150,9 +169,11 @@ class Scheduler:
         for job in jobs:
             if job.name not in dynamic_names:
                 self._append_dynamic_job(job.name, job.prompt, job.cron,
-                                         job.working_dir, session=job.session)
+                                         job.working_dir, session=job.session,
+                                         interval_expr=job.interval)
                 seeded += 1
-                logger.info("Seeded job from config: %s (%s)", job.name, job.cron)
+                schedule = job.cron or f"interval={job.interval}"
+                logger.info("Seeded job from config: %s (%s)", job.name, schedule)
         if seeded:
             logger.info("Seeded %d new jobs from config.yaml", seeded)
 
@@ -161,10 +182,12 @@ class Scheduler:
         for job in self._load_dynamic_jobs():
             job_id = f"job_{job['name']}"
             if job_id not in {j.id for j in self._scheduler.get_jobs()}:
-                self._add_to_scheduler(job["name"], job["prompt"], job["cron"],
+                self._add_to_scheduler(job["name"], job["prompt"], job.get("cron"),
                                        job.get("working_dir"), session=job.get("session", "chat"),
-                                       job_id_prefix="job_")
-                logger.info("Loaded job: %s (%s, session=%s)", job["name"], job["cron"],
+                                       job_id_prefix="job_",
+                                       interval_expr=job.get("interval"))
+                schedule = job.get("cron") or f"interval={job.get('interval')}"
+                logger.info("Loaded job: %s (%s, session=%s)", job["name"], schedule,
                             job.get("session", "chat"))
 
     def load_reminders(self) -> None:
@@ -244,24 +267,34 @@ class Scheduler:
 
     # -- Internal --
 
-    def _add_to_scheduler(self, name: str, prompt: str, cron_expr: str,
+    def _add_to_scheduler(self, name: str, prompt: str, cron_expr: str | None,
                           working_dir: str | None = None, session: str = "chat",
-                          job_id_prefix: str = "user_") -> str:
+                          job_id_prefix: str = "user_",
+                          interval_expr: str | None = None) -> str:
         job_id = f"{job_id_prefix}{name}"
-        parts = cron_expr.strip().split()
-        if len(parts) == 5:
-            trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2],
-                                  month=parts[3],
-                                  day_of_week=_translate_dow(parts[4]))
+
+        if interval_expr:
+            trigger = IntervalTrigger(**_parse_interval(interval_expr))
+            schedule_label = f"every {interval_expr}"
+        elif cron_expr:
+            parts = cron_expr.strip().split()
+            if len(parts) == 5:
+                trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2],
+                                      month=parts[3],
+                                      day_of_week=_translate_dow(parts[4]))
+            else:
+                # 6+ field forms aren't standard cron — pass through as-is.
+                trigger = CronTrigger.from_crontab(cron_expr)
+            schedule_label = cron_expr
         else:
-            # 6+ field forms aren't standard cron — pass through as-is.
-            trigger = CronTrigger.from_crontab(cron_expr)
+            raise ValueError(f"job '{name}' has neither cron nor interval set")
+
         self._scheduler.add_job(
             self._run_job, trigger=trigger, id=job_id, name=name, replace_existing=True,
             kwargs={"job_name": name, "prompt": prompt, "working_dir": working_dir,
                     "session": session},
         )
-        logger.info("Added cron job: %s (%s, session=%s)", name, cron_expr, session)
+        logger.info("Added job: %s (%s, session=%s)", name, schedule_label, session)
         return job_id
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,

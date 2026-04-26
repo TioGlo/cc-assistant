@@ -178,12 +178,15 @@ cc_agents:
     # working_dir: ""              # defaults to {AGENT_ROOT}/coding
     # permission_mode: "dangerously-skip-permissions"
 
-# Scheduled jobs
+# Scheduled jobs (use `cron` OR `interval`, not both)
 scheduler:
   jobs:
     - name: "heartbeat"
       prompt: "Read HEARTBEAT.md and follow its instructions."
-      cron: "25 */2 * * *"
+      interval: "55m"          # interval expression: 30s | 55m | 2h | 1d
+    - name: "morning-summary"
+      prompt: "Summarize tomorrow's calendar."
+      cron: "0 7 * * *"        # standard 5-field cron — minute hour dom month dow
 
 # Optional Slack monitoring
 # slack:
@@ -383,6 +386,14 @@ Register in `~/.claude/settings.json`:
 ```
 
 The notification hook enables **remote approval** — when a tmux agent hits a permission wall, you get a Telegram message with `/approve` and `/deny` commands.
+
+### Cost engineering
+
+Anthropic doesn't publish quotas for Max-plan accounts and has changed its rolling-window semantics multiple times in 2026. To stay ahead of opaque billing:
+
+- **Per-agent model selection** (`cc_agents.model`) — reserve Opus for live thinking and high-stakes work; route deterministic recurring agents (news scouts, structured engagement) to Sonnet or Haiku.
+- **Interval triggers for cache-friendly scheduling.** Claude Code's prompt cache TTL isn't documented but appears to be in the 5-min to 1-hour range. A heartbeat at `interval: "55m"` may land inside the cache window where a `cron: "0 */2 * * *"` always misses; the cache_read/cache_create ratio (visible via `npx ccusage@latest daily`) is the empirical signal.
+- **Daily cost telemetry.** `npx ccusage@latest daily` exposes per-day token-class breakdown (input / output / cache_create / cache_read) and dollar cost. A pre-experiment baseline before changing scheduling cadence makes the impact measurable. The example config includes a `cache-ratio-check` cron that posts a one-line ratio summary to Telegram each night.
 
 ### qmd Setup
 

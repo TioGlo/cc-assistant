@@ -42,9 +42,16 @@ class CCAgent:
 class ScheduledJob:
     name: str
     prompt: str
-    cron: str
+    cron: str | None = None        # 5-field cron expression (e.g. "0 9 * * *")
+    interval: str | None = None    # interval expression (e.g. "55m", "2h", "30s") — mutually exclusive with cron
     working_dir: str | None = None
     session: str = "chat"  # session key in session.json; jobs with the same key share context
+
+    def __post_init__(self):
+        if not self.cron and not self.interval:
+            raise ValueError(f"job '{self.name}' must set either `cron` or `interval`")
+        if self.cron and self.interval:
+            raise ValueError(f"job '{self.name}' sets both `cron` and `interval`; pick one")
 
 
 @dataclass
