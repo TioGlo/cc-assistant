@@ -271,6 +271,7 @@ claude --dangerously-skip-permissions
 | `/schedule <cron> <prompt>` | Add a recurring job |
 | `/remind <delay> <prompt>` | One-shot reminder (e.g. `/remind 2h check deploy`) |
 | `/cancel <name>` | Remove a scheduled job |
+| `/reload` | Re-read `scheduler-jobs.json` and `scheduler-reminders.json` without restarting the service |
 | `/code <task>` | Dispatch to full Claude Code |
 | `/codecheck` | Check coding session output |
 | `/approve <id>` | Approve a tmux permission request |

@@ -211,6 +211,25 @@ class AssistantBot:
         lines = [f"- {j['name']} (next: {j['next_run']})\n  {j['prompt']}" for j in jobs]
         await update.message.reply_text("\n".join(lines))
 
+    async def cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Re-read scheduler-jobs.json and scheduler-reminders.json without restarting."""
+        if not self._is_owner(update):
+            return
+        try:
+            summary = self.scheduler.reload()
+        except Exception as e:
+            logger.exception("Reload failed")
+            await update.message.reply_text(f"Reload failed: {e}")
+            return
+        await update.message.reply_text(
+            f"Reloaded scheduler.\n"
+            f"Jobs: +{summary['jobs_added']} added, "
+            f"~{summary['jobs_replaced']} replaced, "
+            f"−{summary['jobs_removed']} removed.\n"
+            f"Reminders: {summary['reminders_loaded']} active, "
+            f"{summary['reminders_expired']} expired."
+        )
+
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return
@@ -559,6 +578,7 @@ class AssistantBot:
         self.app.add_handler(CommandHandler("reset", self.cmd_reset))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("jobs", self.cmd_jobs))
+        self.app.add_handler(CommandHandler("reload", self.cmd_reload))
         self.app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         self.app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         self.app.add_handler(CommandHandler("remind", self.cmd_remind))

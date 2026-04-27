@@ -85,3 +85,15 @@ To schedule a one-shot delayed task:
 ```
 <!--REMIND:{"prompt":"what to do","delay":"2h"}-->
 ```
+
+### Where scheduled jobs live (and why)
+
+There are two files at the agent root that store scheduling state, and they have **different roles** — confusing them is a common source of bugs.
+
+- **`config.yaml` → `scheduler.jobs`** is a **seed list**. The bot reads it once at startup and merges any jobs it doesn't already know about into the live store. After that it's effectively dormant. Editing `config.yaml` *after* first run won't change a running job — only the very first install picks up its values.
+- **`scheduler-jobs.json`** is the **live store**. Every job created via a SCHEDULE block, every change made via the `/schedule` Telegram command, every modification by the agent at runtime — all written here. This is the source of truth for the scheduler.
+- **`scheduler-reminders.json`** is the same shape for one-shot REMIND-style reminders.
+
+**Implication:** runtime additions never backfill into `config.yaml`. If you create a job via SCHEDULE, it lives in `scheduler-jobs.json` only — the absence of an entry in `config.yaml` is not a bug.
+
+**Hot-reloading without a restart:** direct edits to `scheduler-jobs.json` or `scheduler-reminders.json` need the bot to re-read the file. Use `/reload` in Telegram to pick up changes immediately — no service restart required.

@@ -206,6 +206,84 @@ class Scheduler:
                             job["name"], schedule, job.get("session", "chat"), target,
                             model_label)
 
+    def reload(self) -> dict:
+        """Re-read scheduler-jobs.json and scheduler-reminders.json and sync the
+        running scheduler. Adds new entries, replaces modified ones, removes
+        orphans. Returns a small summary suitable for displaying back to the user.
+        """
+        # --- Recurring jobs ---
+        before_jobs = {j.id for j in self._scheduler.get_jobs() if j.id.startswith("job_")}
+        target_jobs = set()
+        added = 0
+        replaced = 0
+        for job in self._load_dynamic_jobs():
+            job_id = f"job_{job['name']}"
+            target_jobs.add(job_id)
+            delivery_raw = job.get("delivery")
+            delivery = JobDelivery(**delivery_raw) if delivery_raw else None
+            existing = job_id in before_jobs
+            self._add_to_scheduler(job["name"], job["prompt"], job.get("cron"),
+                                   job.get("working_dir"), session=job.get("session", "chat"),
+                                   job_id_prefix="job_",
+                                   interval_expr=job.get("interval"),
+                                   delivery=delivery,
+                                   model=job.get("model", ""))
+            if existing:
+                replaced += 1
+            else:
+                added += 1
+        removed_jobs = before_jobs - target_jobs
+        for job_id in removed_jobs:
+            try:
+                self._scheduler.remove_job(job_id)
+            except Exception:
+                pass
+
+        # --- Reminders ---
+        # Drop all currently-scheduled reminder jobs (those whose IDs match the
+        # ids in scheduler-reminders.json), then re-add from disk.
+        now = datetime.now()
+        existing_reminder_ids = {j.id for j in self._scheduler.get_jobs()
+                                 if j.id not in target_jobs and not j.id.startswith("job_")}
+        # We can't perfectly tell which non-job_ ids are reminders without state,
+        # so be conservative: only remove ones present in the reminders file.
+        on_disk = self._load_reminders()
+        on_disk_ids = {r["id"] for r in on_disk}
+        for rid in (existing_reminder_ids & on_disk_ids):
+            try:
+                self._scheduler.remove_job(rid)
+            except Exception:
+                pass
+
+        reminder_added = 0
+        reminder_dropped = 0
+        surviving = []
+        for r in on_disk:
+            run_at = datetime.fromisoformat(r["run_at"])
+            if run_at <= now:
+                reminder_dropped += 1
+                continue
+            self._scheduler.add_job(
+                self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
+                name=f"reminder @ {run_at.strftime('%H:%M')}", replace_existing=True,
+                kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
+                        "session": r.get("session", "chat")},
+            )
+            reminder_added += 1
+            surviving.append(r)
+        if len(surviving) != len(on_disk):
+            self._save_reminders(surviving)
+
+        summary = {
+            "jobs_added": added,
+            "jobs_replaced": replaced,
+            "jobs_removed": len(removed_jobs),
+            "reminders_loaded": reminder_added,
+            "reminders_expired": reminder_dropped,
+        }
+        logger.info("Reload: %s", summary)
+        return summary
+
     def load_reminders(self) -> None:
         """Reload persisted reminders that haven't fired yet."""
         now = datetime.now()
