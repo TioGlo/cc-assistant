@@ -8,6 +8,39 @@ SCHEDULE_PATTERN = re.compile(r"<!--SCHEDULE:(.*?)-->", re.DOTALL)
 REMIND_PATTERN = re.compile(r"<!--REMIND:(.*?)-->", re.DOTALL)
 DELEGATE_PATTERN = re.compile(r"<!--DELEGATE:(.*?)-->", re.DOTALL)
 
+# Match fenced code blocks (```...```) and inline code (`...`) so we leave
+# their contents alone when transforming markdown for Telegram.
+_CODE_REGION_PATTERN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
+
+
+def to_telegram_markdown(text: str) -> str:
+    """Convert standard markdown to Telegram's legacy `Markdown` parse mode.
+
+    Telegram's legacy mode uses single asterisks for bold: `*bold*` (not the
+    `**bold**` of CommonMark / Claude's default output). It also doesn't
+    support headers. This converter rewrites the most common Claude→Telegram
+    incompatibilities while leaving code regions untouched.
+
+    Conversions outside code regions:
+      - `**bold**` → `*bold*`
+      - leading `# `, `## `, `### ` headers → `*…*` (bold the line)
+
+    Code blocks (```...```) and inline `code` are passed through verbatim.
+    Telegram preserves the language tag on fenced blocks.
+    """
+    parts = _CODE_REGION_PATTERN.split(text)
+    out: list[str] = []
+    for part in parts:
+        if part.startswith("`"):
+            out.append(part)
+            continue
+        # **bold** → *bold*
+        part = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", part)
+        # Headers (#, ##, ###...) → bold line
+        part = re.sub(r"(?m)^#{1,6}\s+(.*)$", r"*\1*", part)
+        out.append(part)
+    return "".join(out)
+
 
 @dataclass
 class ScheduleCommand:

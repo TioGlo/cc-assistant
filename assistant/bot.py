@@ -24,6 +24,7 @@ from .formatter import (
     extract_schedule_commands,
     split_message,
     strip_commands,
+    to_telegram_markdown,
 )
 from .scheduler import Scheduler
 from .session import SessionManager
@@ -69,7 +70,32 @@ class AssistantBot:
 
     async def _send_text(self, chat_id: int, text: str) -> None:
         for chunk in split_message(text):
+            await self._send_chunk(chat_id, chunk)
+
+    async def _send_chunk(self, chat_id: int, chunk: str) -> None:
+        """Send one chunk with Telegram Markdown rendering. Falls back to
+        plain text on any parse error so a stray '*' or '_' in the model's
+        output never blocks delivery.
+        """
+        try:
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=to_telegram_markdown(chunk),
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.debug("Markdown send failed (%s); falling back to plain", e)
             await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+
+    async def _reply(self, update: Update, text: str) -> None:
+        """update.message.reply_text with Markdown + plain fallback."""
+        try:
+            await update.message.reply_text(
+                to_telegram_markdown(text), parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.debug("Markdown reply failed (%s); falling back to plain", e)
+            await update.message.reply_text(text)
 
     # -- Discord wiring --
 
@@ -394,7 +420,7 @@ class AssistantBot:
         chat_id = update.effective_chat.id
 
         async def send_text(chunk: str) -> None:
-            await update.message.reply_text(chunk)
+            await self._reply(update, chunk)
 
         async def send_typing() -> None:
             await self._keep_typing(chat_id)
