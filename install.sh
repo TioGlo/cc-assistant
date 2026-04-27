@@ -259,8 +259,10 @@ if [ ! -d "$ONBOARDING_DIR" ]; then
 TMPL
     fi
 
+    # Portable title-case (macOS bash 3.2 lacks ${var^})
+    ONBOARDING_TITLE="$(tr '[:lower:]' '[:upper:]' <<< "${ONBOARDING_NAME:0:1}")${ONBOARDING_NAME:1}"
     cat > "$ONBOARDING_DIR/items.md" <<TMPL
-# ${ONBOARDING_NAME^} — Items
+# ${ONBOARDING_TITLE} — Items
 
 Learnings about the user, captured as you discover them. Once this list gets
 substantial, promote the durable facts into USER.md.
