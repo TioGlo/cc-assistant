@@ -131,24 +131,31 @@ For headless servers, add `--headless=new`. Sessions persist in the profile — 
 ## Architecture
 
 ```
-Telegram Bot
-      │
-      ▼
-Bot Gateway (Python) ──── Claude Code CLI (claude -p)
-      │                         │
-      ├── Scheduler        Workspace CLAUDE.md
-      │   (cron jobs)      (agent identity)
-      │
-      ├── Tmux Dispatch ──── Claude Code (interactive)
-      │   (fire & forget)     ├── Teams
-      │                       ├── Subagents
-      │                       └── Browser MCP
-      │
-      └── Slack Monitor
-          (optional)
+Telegram Bot ──┐
+               │
+Discord Bot ───┼──► Bot Gateway (Python) ──── Claude Code CLI (claude -p)
+   (optional)  │           │                         │
+               │           ├── Scheduler        Workspace CLAUDE.md
+               │           │   (cron jobs)      (agent identity)
+               │           │
+               │           ├── Tmux Dispatch ──── Claude Code (interactive)
+               │           │   (fire & forget)     ├── Teams
+               │           │                       ├── Subagents
+               │           │                       └── Browser MCP
+               │           │
+               │           └── Slack Monitor
+               │               (optional)
+               ▼
+        Inbound transports share one bridge,
+        scheduler, and session manager.
 ```
 
-The bot is a thin gateway. Each Telegram message goes to `claude -p` which runs in the agent's workspace where `CLAUDE.md` defines its identity. Heavy tasks get delegated to tmux Claude Code instances with full interactive capabilities.
+The bot is a thin gateway. Messages from any transport go to `claude -p` which runs in the agent's workspace where `CLAUDE.md` defines its identity. Heavy tasks get delegated to tmux Claude Code instances with full interactive capabilities.
+
+**Multi-transport notes:**
+- Each Discord channel gets its own session (`discord:<channel_id>`) so context doesn't bleed between e.g. `#daily-flow` and `#shop-floor`. Telegram direct chat uses session `chat`.
+- Inbound messages are prefixed for transport awareness — `[discord:#channel-name] ...`, `[voice] ...` (transcribed Telegram voice), or no prefix (Telegram direct).
+- Scheduled jobs target the default transport (Telegram owner) unless `delivery: { transport: "discord", channel_id: "..." }` is set on the job.
 
 ## Configuration
 
@@ -163,7 +170,7 @@ claude:
   model: "opus"                     # or sonnet, haiku
   permission_mode: "bypassPermissions"
   system_prompt: |
-    You are a personal AI assistant accessible via Telegram.
+    You are a personal AI assistant.
     # ... see config.example.yaml for full template
   system_prompt_files:              # files appended to system prompt per invocation
     - "~/.myagent/workspace/self-improving/memory.md"
@@ -187,6 +194,21 @@ scheduler:
     - name: "morning-summary"
       prompt: "Summarize tomorrow's calendar."
       cron: "0 7 * * *"        # standard 5-field cron — minute hour dom month dow
+    - name: "team-standup"
+      prompt: "Post the daily standup template."
+      cron: "0 9 * * 1-5"
+      delivery:                # optional — route this job to a Discord channel
+        transport: "discord"   #            instead of the default Telegram owner
+        channel_id: "1234567890123456789"
+
+# Optional Discord transport (see config.example.yaml for the full block)
+# discord:
+#   enabled: true
+#   bot_token: "YOUR_DISCORD_BOT_TOKEN"
+#   guilds:
+#     "GUILD_ID":
+#       channels:
+#         "CHANNEL_ID": { requireMention: false }
 
 # Optional Slack monitoring
 # slack:
