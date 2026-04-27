@@ -17,7 +17,7 @@ from telegram.ext import (
 
 from . import paths
 from .bridge import AuthError, BridgeError, ClaudeBridge
-from .config import Config
+from .config import Config, JobDelivery
 from .formatter import (
     extract_delegate_commands,
     extract_remind_commands,
@@ -31,6 +31,10 @@ from .tmux_dispatch import TmuxDispatch
 from .voice import TranscriptionEngine, get_engine
 
 logger = logging.getLogger(__name__)
+
+# Type alias avoiding circular import with discord_bot.py
+SendTextFn = "Callable[[str], Awaitable[None]]"
+SendTypingFn = "Callable[[], Awaitable[None]] | None"
 
 
 class AssistantBot:
@@ -46,6 +50,9 @@ class AssistantBot:
         self._start_time = time.time()
         self.app: Application | None = None
         self.voice_engine: TranscriptionEngine | None = None
+        # Set later by main.py via set_discord_bot(); used to route
+        # cron jobs whose delivery.transport == "discord".
+        self.discord_bot = None
         if config.voice.enabled:
             try:
                 self.voice_engine = get_engine(config.voice)
@@ -64,16 +71,46 @@ class AssistantBot:
         for chunk in split_message(text):
             await self.app.bot.send_message(chat_id=chat_id, text=chunk)
 
+    # -- Discord wiring --
+
+    def set_discord_bot(self, discord_bot) -> None:
+        """Wired by main.py after both bots are constructed.
+
+        Allows on_job_result to deliver to Discord channels and lets
+        DiscordBot reach back into AssistantBot for the shared message-
+        processing pipeline.
+        """
+        self.discord_bot = discord_bot
+
     # -- Scheduler callback --
 
-    async def on_job_result(self, job_name: str, result_text: str) -> None:
-        chat_id = self.config.telegram.owner_id
+    async def on_job_result(
+        self, job_name: str, result_text: str,
+        delivery: JobDelivery | None = None,
+    ) -> None:
         self._process_commands(result_text)
         await self._process_delegations_from_job(result_text)
         clean_text = strip_commands(result_text)
-        if clean_text:
-            header = f"**Scheduled: {job_name}**\n\n"
-            await self._send_text(chat_id, header + clean_text)
+        if not clean_text:
+            return
+
+        # Route based on delivery
+        if delivery and delivery.transport == "discord" and delivery.channel_id:
+            if self.discord_bot is None:
+                logger.warning(
+                    "Job %s wants Discord delivery but Discord bot is not configured;"
+                    " falling back to Telegram",
+                    job_name,
+                )
+            else:
+                header = f"**Scheduled: {job_name}**\n\n"
+                await self.discord_bot.send_to_channel(delivery.channel_id, header + clean_text)
+                return
+
+        # Default: Telegram owner
+        chat_id = self.config.telegram.owner_id
+        header = f"**Scheduled: {job_name}**\n\n"
+        await self._send_text(chat_id, header + clean_text)
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
@@ -334,40 +371,65 @@ class AssistantBot:
         await self._process_user_text(text, update)
 
     async def _process_user_text(self, text: str, update: Update) -> None:
-        """Run text through the LLM, send the reply, process commands/delegations.
-
-        Shared by handle_message and handle_voice_message — Telegram Message
-        objects are immutable so we route text directly instead of mutating.
-        """
+        """Telegram-specific entrypoint — wraps the transport-agnostic core."""
         chat_id = update.effective_chat.id
-        typing_task = asyncio.create_task(self._keep_typing(chat_id))
+
+        async def send_text(chunk: str) -> None:
+            await update.message.reply_text(chunk)
+
+        async def send_typing() -> None:
+            await self._keep_typing(chat_id)
+
+        await self.process_text_input(
+            text=text, session_key="chat",
+            send_text=send_text, send_typing=send_typing,
+        )
+
+    async def process_text_input(
+        self, text: str, session_key: str,
+        send_text, send_typing=None,
+    ) -> None:
+        """Transport-agnostic core: run text through the LLM, send the reply,
+        process embedded commands/delegations.
+
+        Used by both Telegram message handlers and the Discord bot.
+        - text: user prompt (already cleaned of channel-specific markup)
+        - session_key: claude session ID key — "chat" for Telegram, "discord:<channel_id>" for Discord
+        - send_text(chunk): async callable that sends a chunk to the user
+        - send_typing(): optional async callable that pulses a typing indicator
+          until cancelled
+        """
+        typing_task = asyncio.create_task(send_typing()) if send_typing else None
         try:
-            session_id = self.session_manager.get_session_id("chat")
+            session_id = self.session_manager.get_session_id(session_key)
             try:
-                response_text, new_session_id = await self.bridge.send_simple(text, session_id=session_id)
+                response_text, new_session_id = await self.bridge.send_simple(
+                    text, session_id=session_id,
+                )
             except BridgeError as e:
                 if session_id and "No conversation found" in str(e):
-                    logger.info("Stale chat session, falling back to fresh")
-                    self.session_manager.clear_session("chat")
+                    logger.info("Stale session %s, falling back to fresh", session_key)
+                    self.session_manager.clear_session(session_key)
                     response_text, new_session_id = await self.bridge.send_simple(text)
                 else:
                     raise
             if new_session_id:
-                self.session_manager.set_session_id(new_session_id, "chat")
+                self.session_manager.set_session_id(new_session_id, session_key)
             self._process_commands(response_text)
-            await self._process_delegations(response_text, update)
+            await self._process_delegations(response_text, send_text)
             clean_text = strip_commands(response_text)
             if clean_text:
                 for chunk in split_message(clean_text):
-                    await update.message.reply_text(chunk)
+                    await send_text(chunk)
         except AuthError as e:
             logger.error("Auth failure: %s", e)
-            await update.message.reply_text("Authentication expired. Run `claude auth login` on the server.")
+            await send_text("Authentication expired. Run `claude auth login` on the server.")
         except Exception as e:
             logger.exception("Error handling message")
-            await update.message.reply_text(f"Error: {e}")
+            await send_text(f"Error: {e}")
         finally:
-            typing_task.cancel()
+            if typing_task is not None:
+                typing_task.cancel()
 
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Transcribe a Telegram voice note and route the text through handle_message."""
@@ -425,17 +487,17 @@ class AssistantBot:
             except ValueError as e:
                 logger.warning("Invalid remind command: %s", e)
 
-    async def _process_delegations(self, text: str, update: Update) -> None:
+    async def _process_delegations(self, text: str, send_text) -> None:
         for cmd in extract_delegate_commands(text):
             session = cmd.session or None
             task = self._enrich_with_project(cmd.task, cmd.project)
             logger.info("Delegating task: %s", cmd.task[:80])
             try:
                 status = await self.tmux.dispatch(task, timeout=cmd.timeout, session=session)
-                await update.message.reply_text(status)
+                await send_text(status)
             except Exception as e:
                 logger.exception("Delegation failed")
-                await update.message.reply_text(f"Delegation failed: {e}")
+                await send_text(f"Delegation failed: {e}")
 
     async def _keep_typing(self, chat_id: int) -> None:
         try:
