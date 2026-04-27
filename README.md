@@ -191,9 +191,11 @@ scheduler:
     - name: "heartbeat"
       prompt: "Read HEARTBEAT.md and follow its instructions."
       interval: "55m"          # interval expression: 30s | 55m | 2h | 1d
-    - name: "morning-summary"
-      prompt: "Summarize tomorrow's calendar."
-      cron: "0 7 * * *"        # standard 5-field cron — minute hour dom month dow
+      model: "sonnet"          # cheap model for cheap recurring work; auto-uses session=chat-sonnet
+    - name: "email-triage"
+      prompt: "Use the @email-triager subagent to triage the inbox."
+      cron: "0 9,14,19 * * *"  # standard 5-field cron — minute hour dom month dow
+      model: "haiku"           # routing-only — Haiku is fine
     - name: "team-standup"
       prompt: "Post the daily standup template."
       cron: "0 9 * * 1-5"
@@ -414,7 +416,8 @@ The notification hook enables **remote approval** — when a tmux agent hits a p
 Anthropic doesn't publish quotas for Max-plan accounts and has changed its rolling-window semantics multiple times in 2026. To stay ahead of opaque billing:
 
 - **Per-agent model selection** (`cc_agents.model`) — reserve Opus for live thinking and high-stakes work; route deterministic recurring agents (news scouts, structured engagement) to Sonnet or Haiku.
-- **Interval triggers for cache-friendly scheduling.** Claude Code's prompt cache TTL isn't documented but appears to be in the 5-min to 1-hour range. A heartbeat at `interval: "55m"` may land inside the cache window where a `cron: "0 */2 * * *"` always misses; the cache_read/cache_create ratio (visible via `npx ccusage@latest daily`) is the empirical signal.
+- **Per-job model selection** (`scheduler.jobs[].model`) — most cron jobs do routing or short structured synthesis; both are firmly Sonnet/Haiku territory. Setting `model: "sonnet"` or `model: "haiku"` on a job passes `--model <model>` to its `claude -p` invocation. The scheduler **auto-isolates the resume session per model** (default `chat` becomes `chat-sonnet` / `chat-haiku`) so `--resume` doesn't try to rehydrate a conversation built under a different model. Explicit `session:` overrides the auto-isolation. Triage rule of thumb: prompts that just emit a DELEGATE block or invoke a subagent → Haiku; structured tool use + short synthesis → Sonnet; reserve Opus for jobs where the prompt itself needs creative judgment.
+- **Interval triggers for cache-friendly scheduling.** Claude Code's prompt cache TTL isn't documented but appears to be in the 5-min to 1-hour range. A heartbeat at `interval: "55m"` may land inside the cache window where a `cron: "0 */2 * * *"` always misses; the cache_read/cache_create ratio (visible via `npx ccusage@latest daily`) is the empirical signal. Note: per-job model isolation creates separate caches per session pool — individual ratios may dip even as total dollar cost falls because Sonnet/Haiku cache_create is much cheaper than Opus cache_create. **Watch the dollar line, not just the ratio.**
 - **Daily cost telemetry.** `npx ccusage@latest daily` exposes per-day token-class breakdown (input / output / cache_create / cache_read) and dollar cost. A pre-experiment baseline before changing scheduling cadence makes the impact measurable. The example config includes a `cache-ratio-check` cron that posts a one-line ratio summary to Telegram each night.
 
 ### qmd Setup

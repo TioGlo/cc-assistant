@@ -89,15 +89,35 @@ scheduler:
   # The agent can create/modify jobs at runtime via SCHEDULE blocks.
   # Config seeds only run once — editing here after first run has no effect.
   # To modify a running job, use /cancel then /schedule, or have the agent emit a SCHEDULE block.
+  #
+  # Each job needs `cron` OR `interval` (mutually exclusive).
+  # Optional fields: working_dir, session, model, delivery.
+  #
+  # `model` (recommended for cheap recurring work):
+  #   passed to claude -p as `--model <model>`. Empty / omitted = inherit
+  #   claude.model above. Setting a per-job model auto-isolates the resume
+  #   session as "chat-<model>" so --resume doesn't cross-contaminate
+  #   conversations built under different models.
+  #   Rule of thumb: routing/templating prompts → haiku; structured tool use
+  #   and short synthesis → sonnet; reserve opus for live thinking.
   jobs:
     - name: "heartbeat"
       prompt: "Read the HEARTBEAT.md in your workspace and follow its instructions."
-      cron: "25 */2 * * *"
+      interval: "55m"          # interval expression: 30s | 55m | 2h | 1d
+      model: "sonnet"          # heartbeat is structured but not creative — sonnet is plenty
   # More examples:
+  # - name: "morning-summary"
+  #   prompt: "Summarize tomorrow's calendar."
+  #   cron: "0 7 * * *"        # standard 5-field cron
+  #   model: "sonnet"
+  # - name: "email-triage"
+  #   prompt: "Use the @email-triager subagent to triage the inbox."
+  #   cron: "0 9,14,19 * * *"
+  #   model: "haiku"           # pure routing — Haiku is fine
   # - name: "research-digest"
   #   prompt: "Check AI news sources and summarize what's new."
   #   cron: "0 7 * * *"
-  #   session: "research"      # optional: isolate this job's context from the main chat
+  #   session: "research"      # optional: explicit session overrides the chat-<model> default
 
 # Voice input (Phase 1 — transcription of Telegram voice messages).
 # Install: uv sync --extra voice    (pulls faster-whisper)
