@@ -39,6 +39,18 @@ class CCAgent:
 
 
 @dataclass
+class JobDelivery:
+    """Optional delivery routing for a scheduled job.
+
+    Default behavior (when delivery is None) sends to the Telegram owner.
+    When transport is "discord", the result is sent to the named Discord
+    channel via the Discord bot.
+    """
+    transport: str = "telegram"  # "telegram" | "discord"
+    channel_id: str | int | None = None  # Discord channel ID (required if transport=="discord")
+
+
+@dataclass
 class ScheduledJob:
     name: str
     prompt: str
@@ -46,12 +58,17 @@ class ScheduledJob:
     interval: str | None = None    # interval expression (e.g. "55m", "2h", "30s") — mutually exclusive with cron
     working_dir: str | None = None
     session: str = "chat"  # session key in session.json; jobs with the same key share context
+    delivery: JobDelivery | None = None  # default: Telegram owner
 
     def __post_init__(self):
         if not self.cron and not self.interval:
             raise ValueError(f"job '{self.name}' must set either `cron` or `interval`")
         if self.cron and self.interval:
             raise ValueError(f"job '{self.name}' sets both `cron` and `interval`; pick one")
+        if isinstance(self.delivery, dict):
+            self.delivery = JobDelivery(**self.delivery)
+        if self.delivery and self.delivery.transport == "discord" and not self.delivery.channel_id:
+            raise ValueError(f"job '{self.name}' has discord delivery but no channel_id")
 
 
 @dataclass
@@ -62,6 +79,61 @@ class SlackConfig:
     history_limit: int = 50
     triage_interval: int = 900
     enabled: bool = False
+
+
+@dataclass
+class DiscordChannelConfig:
+    """Per-channel routing rules. requireMention=True means the bot only
+    responds when @-mentioned in that channel; False means it responds to
+    every message (use for private/dedicated channels)."""
+    requireMention: bool = True
+
+
+@dataclass
+class DiscordGuildConfig:
+    channels: dict[str, DiscordChannelConfig] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Allow YAML to pass plain dicts; coerce them
+        coerced = {}
+        for cid, cfg in self.channels.items():
+            if isinstance(cfg, dict):
+                coerced[str(cid)] = DiscordChannelConfig(**cfg)
+            else:
+                coerced[str(cid)] = cfg
+        self.channels = coerced
+
+
+@dataclass
+class DiscordConfig:
+    bot_token: str = ""
+    enabled: bool = False
+    guilds: dict[str, DiscordGuildConfig] = field(default_factory=dict)
+    # Default mention requirement for any channel not explicitly listed under a guild.
+    # Most safe: require mention when channel is unknown.
+    default_require_mention: bool = True
+
+    def __post_init__(self):
+        coerced = {}
+        for gid, cfg in self.guilds.items():
+            if isinstance(cfg, dict):
+                coerced[str(gid)] = DiscordGuildConfig(**cfg)
+            else:
+                coerced[str(gid)] = cfg
+        self.guilds = coerced
+
+    def channel_requires_mention(self, guild_id: int | str | None, channel_id: int | str) -> bool | None:
+        """Return True/False if the channel is allowlisted, None if it isn't.
+        None signals 'do not respond' — channel is outside the allowlist entirely."""
+        if guild_id is None:
+            return None
+        guild = self.guilds.get(str(guild_id))
+        if guild is None:
+            return None
+        ch = guild.channels.get(str(channel_id))
+        if ch is None:
+            return None
+        return ch.requireMention
 
 
 @dataclass
@@ -77,6 +149,7 @@ class Config:
     slack: SlackConfig
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     cc_agents: list[CCAgent] = field(default_factory=list)
+    discord: DiscordConfig = field(default_factory=DiscordConfig)
 
     @property
     def default_agent(self) -> CCAgent | None:
@@ -105,5 +178,7 @@ def load_config(path: str | Path) -> Config:
     agents_raw = raw.get("cc_agents", [])
     cc_agents = [CCAgent(**a) for a in agents_raw]
 
+    discord = DiscordConfig(**raw.get("discord", {}))
+
     return Config(telegram=telegram, claude=claude, scheduler=scheduler,
-                  slack=slack, voice=voice, cc_agents=cc_agents)
+                  slack=slack, voice=voice, cc_agents=cc_agents, discord=discord)

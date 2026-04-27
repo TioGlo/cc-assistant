@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from .bridge import ClaudeBridge
-from .config import ScheduledJob
+from .config import JobDelivery, ScheduledJob
 from .session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _translate_dow(field: str) -> str:
     """
     return re.sub(r"\b[0-7]\b", lambda m: _CRON_DOW_NAMES[m.group(0)], field)
 
-JobCallback = Callable[[str, str], Awaitable[None]]
+JobCallback = Callable[[str, str, "JobDelivery | None"], Awaitable[None]]
 
 
 def parse_delay(delay_str: str) -> timedelta:
@@ -104,7 +104,8 @@ class Scheduler:
 
     def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str | None,
                             working_dir: str | None = None, session: str = "chat",
-                            interval_expr: str | None = None) -> None:
+                            interval_expr: str | None = None,
+                            delivery: JobDelivery | None = None) -> None:
         jobs = self._load_dynamic_jobs()
         jobs = [j for j in jobs if j["name"] != name]
         entry = {"name": name, "prompt": prompt,
@@ -115,6 +116,9 @@ class Scheduler:
             entry["interval"] = interval_expr
         if session != "chat":
             entry["session"] = session
+        if delivery is not None:
+            entry["delivery"] = {"transport": delivery.transport,
+                                 "channel_id": delivery.channel_id}
         jobs.append(entry)
         self._save_dynamic_jobs(jobs)
 
@@ -170,7 +174,8 @@ class Scheduler:
             if job.name not in dynamic_names:
                 self._append_dynamic_job(job.name, job.prompt, job.cron,
                                          job.working_dir, session=job.session,
-                                         interval_expr=job.interval)
+                                         interval_expr=job.interval,
+                                         delivery=job.delivery)
                 seeded += 1
                 schedule = job.cron or f"interval={job.interval}"
                 logger.info("Seeded job from config: %s (%s)", job.name, schedule)
@@ -182,13 +187,17 @@ class Scheduler:
         for job in self._load_dynamic_jobs():
             job_id = f"job_{job['name']}"
             if job_id not in {j.id for j in self._scheduler.get_jobs()}:
+                delivery_raw = job.get("delivery")
+                delivery = JobDelivery(**delivery_raw) if delivery_raw else None
                 self._add_to_scheduler(job["name"], job["prompt"], job.get("cron"),
                                        job.get("working_dir"), session=job.get("session", "chat"),
                                        job_id_prefix="job_",
-                                       interval_expr=job.get("interval"))
+                                       interval_expr=job.get("interval"),
+                                       delivery=delivery)
                 schedule = job.get("cron") or f"interval={job.get('interval')}"
-                logger.info("Loaded job: %s (%s, session=%s)", job["name"], schedule,
-                            job.get("session", "chat"))
+                target = (delivery.transport if delivery else "telegram")
+                logger.info("Loaded job: %s (%s, session=%s, target=%s)",
+                            job["name"], schedule, job.get("session", "chat"), target)
 
     def load_reminders(self) -> None:
         """Reload persisted reminders that haven't fired yet."""
@@ -219,10 +228,13 @@ class Scheduler:
     # -- Public API --
 
     def add_cron_job(self, name: str, prompt: str, cron_expr: str,
-                     working_dir: str | None = None, session: str = "chat") -> str:
+                     working_dir: str | None = None, session: str = "chat",
+                     delivery: JobDelivery | None = None) -> str:
         job_id = self._add_to_scheduler(name, prompt, cron_expr, working_dir,
-                                        session=session, job_id_prefix="job_")
-        self._append_dynamic_job(name, prompt, cron_expr, working_dir, session=session)
+                                        session=session, job_id_prefix="job_",
+                                        delivery=delivery)
+        self._append_dynamic_job(name, prompt, cron_expr, working_dir, session=session,
+                                 delivery=delivery)
         return job_id
 
     def add_one_shot(self, prompt: str, delay: str, working_dir: str | None = None,
@@ -270,7 +282,8 @@ class Scheduler:
     def _add_to_scheduler(self, name: str, prompt: str, cron_expr: str | None,
                           working_dir: str | None = None, session: str = "chat",
                           job_id_prefix: str = "user_",
-                          interval_expr: str | None = None) -> str:
+                          interval_expr: str | None = None,
+                          delivery: JobDelivery | None = None) -> str:
         job_id = f"{job_id_prefix}{name}"
 
         if interval_expr:
@@ -289,17 +302,24 @@ class Scheduler:
         else:
             raise ValueError(f"job '{name}' has neither cron nor interval set")
 
+        # Stash delivery as a plain dict in kwargs so APScheduler can persist it
+        # (apscheduler pickles kwargs; a dict is friendlier than a dataclass).
+        delivery_dict = (
+            {"transport": delivery.transport, "channel_id": delivery.channel_id}
+            if delivery else None
+        )
         self._scheduler.add_job(
             self._run_job, trigger=trigger, id=job_id, name=name, replace_existing=True,
             kwargs={"job_name": name, "prompt": prompt, "working_dir": working_dir,
-                    "session": session},
+                    "session": session, "delivery": delivery_dict},
         )
         logger.info("Added job: %s (%s, session=%s)", name, schedule_label, session)
         return job_id
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,
-                       session: str = "chat") -> None:
+                       session: str = "chat", delivery: dict | None = None) -> None:
         logger.info("Executing scheduled job: %s (session=%s)", job_name, session)
+        delivery_obj = JobDelivery(**delivery) if delivery else None
         session_id = self.session_manager.get_session_id(session)
         max_retries = 3
         for attempt in range(max_retries):
@@ -310,7 +330,7 @@ class Scheduler:
                 if new_session_id:
                     self.session_manager.set_session_id(new_session_id, session)
                 if self._callback:
-                    await self._callback(job_name, result_text)
+                    await self._callback(job_name, result_text, delivery_obj)
                 return
             except Exception as e:
                 logger.error("Job %s attempt %d failed: %s", job_name, attempt + 1, e)
@@ -320,7 +340,10 @@ class Scheduler:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt * 5)
         if self._callback:
-            await self._callback(job_name, f"Job failed after {max_retries} attempts. Check logs.")
+            await self._callback(
+                job_name, f"Job failed after {max_retries} attempts. Check logs.",
+                delivery_obj,
+            )
 
     async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
                             session: str = "chat") -> None:

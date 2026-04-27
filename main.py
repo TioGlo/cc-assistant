@@ -7,6 +7,7 @@ from assistant import paths
 from assistant.bot import AssistantBot
 from assistant.bridge import ClaudeBridge
 from assistant.config import load_config
+from assistant.discord_bot import DiscordBot
 from assistant.scheduler import Scheduler
 from assistant.session import SessionManager
 from assistant.slack_monitor import SlackMonitor
@@ -59,6 +60,11 @@ def main() -> None:
     bot = AssistantBot(config, bridge, session_manager, scheduler)
     scheduler.set_callback(bot.on_job_result)
 
+    # Discord transport (optional). Wired before scheduler.start() so outbound
+    # cron deliveries find a ready bot.
+    discord_bot = DiscordBot(config.discord, assistant_bot=bot)
+    bot.set_discord_bot(discord_bot)
+
     # Tmux dispatch results go to Telegram
     async def on_code_result(task_id: str, result_text: str) -> None:
         await bot.on_job_result(f"Code: {task_id}", result_text)
@@ -82,9 +88,11 @@ def main() -> None:
         scheduler.load_reminders()
         logger.info("Scheduler started")
         await slack_monitor.start()
+        await discord_bot.start()
         await bot.warmup_voice()
 
     async def post_shutdown(application) -> None:
+        await discord_bot.stop()
         await slack_monitor.stop()
         scheduler.stop()
         logger.info("Shutdown complete")

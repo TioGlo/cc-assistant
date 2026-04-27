@@ -35,6 +35,22 @@ claude:
   # Optional: path to MCP server config JSON file
   # mcp_config: "/path/to/mcp.json"
 
+# Optional: Discord transport
+# Lets the agent receive messages on allowlisted Discord channels and
+# deliver scheduled jobs there (set `delivery: { transport: "discord",
+# channel_id: "..." }` on a job to route it to a channel instead of Telegram).
+# discord:
+#   enabled: true
+#   bot_token: "YOUR_DISCORD_BOT_TOKEN"
+#   default_require_mention: true   # safe default for any unlisted channel
+#   guilds:
+#     "1234567890123456789":        # guild (server) ID
+#       channels:
+#         "9876543210987654321":    # channel ID
+#           requireMention: false   # respond to every message in this channel
+#         "1111111111111111111":
+#           requireMention: true    # respond only when @-mentioned
+
 # Optional: Slack monitoring
 # slack:
 #   enabled: true
