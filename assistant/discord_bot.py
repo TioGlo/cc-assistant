@@ -127,6 +127,12 @@ class DiscordBot:
         if not text:
             return
 
+        # Prefix with transport+channel so Claude sees what surface this came
+        # from. Plain text without a prefix = Telegram direct (matches the
+        # existing convention where voice messages get a "[voice] " prefix).
+        channel_name = getattr(message.channel, "name", str(message.channel.id))
+        text = f"[discord:#{channel_name}] {text}"
+
         session_key = f"discord:{message.channel.id}"
         logger.info(
             "Discord inbound (guild=%s channel=%s author=%s): %s",
