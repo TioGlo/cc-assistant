@@ -59,6 +59,7 @@ class ScheduledJob:
     working_dir: str | None = None
     session: str = "chat"  # session key in session.json; jobs with the same key share context
     delivery: JobDelivery | None = None  # default: Telegram owner
+    model: str = ""        # passed to claude -p as --model; empty = inherit claude.model
 
     def __post_init__(self):
         if not self.cron and not self.interval:
@@ -69,6 +70,11 @@ class ScheduledJob:
             self.delivery = JobDelivery(**self.delivery)
         if self.delivery and self.delivery.transport == "discord" and not self.delivery.channel_id:
             raise ValueError(f"job '{self.name}' has discord delivery but no channel_id")
+        # Auto-isolate session per model so --resume doesn't try to rehydrate
+        # a conversation built under a different model. Only kicks in when the
+        # job leaves session at the default "chat" — explicit session= still wins.
+        if self.model and self.session == "chat":
+            self.session = f"chat-{self.model}"
 
 
 @dataclass

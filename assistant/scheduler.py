@@ -105,7 +105,8 @@ class Scheduler:
     def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str | None,
                             working_dir: str | None = None, session: str = "chat",
                             interval_expr: str | None = None,
-                            delivery: JobDelivery | None = None) -> None:
+                            delivery: JobDelivery | None = None,
+                            model: str = "") -> None:
         jobs = self._load_dynamic_jobs()
         jobs = [j for j in jobs if j["name"] != name]
         entry = {"name": name, "prompt": prompt,
@@ -119,6 +120,8 @@ class Scheduler:
         if delivery is not None:
             entry["delivery"] = {"transport": delivery.transport,
                                  "channel_id": delivery.channel_id}
+        if model:
+            entry["model"] = model
         jobs.append(entry)
         self._save_dynamic_jobs(jobs)
 
@@ -175,7 +178,8 @@ class Scheduler:
                 self._append_dynamic_job(job.name, job.prompt, job.cron,
                                          job.working_dir, session=job.session,
                                          interval_expr=job.interval,
-                                         delivery=job.delivery)
+                                         delivery=job.delivery,
+                                         model=job.model)
                 seeded += 1
                 schedule = job.cron or f"interval={job.interval}"
                 logger.info("Seeded job from config: %s (%s)", job.name, schedule)
@@ -193,11 +197,14 @@ class Scheduler:
                                        job.get("working_dir"), session=job.get("session", "chat"),
                                        job_id_prefix="job_",
                                        interval_expr=job.get("interval"),
-                                       delivery=delivery)
+                                       delivery=delivery,
+                                       model=job.get("model", ""))
                 schedule = job.get("cron") or f"interval={job.get('interval')}"
                 target = (delivery.transport if delivery else "telegram")
-                logger.info("Loaded job: %s (%s, session=%s, target=%s)",
-                            job["name"], schedule, job.get("session", "chat"), target)
+                model_label = f" model={job['model']}" if job.get("model") else ""
+                logger.info("Loaded job: %s (%s, session=%s, target=%s%s)",
+                            job["name"], schedule, job.get("session", "chat"), target,
+                            model_label)
 
     def load_reminders(self) -> None:
         """Reload persisted reminders that haven't fired yet."""
@@ -283,7 +290,8 @@ class Scheduler:
                           working_dir: str | None = None, session: str = "chat",
                           job_id_prefix: str = "user_",
                           interval_expr: str | None = None,
-                          delivery: JobDelivery | None = None) -> str:
+                          delivery: JobDelivery | None = None,
+                          model: str = "") -> str:
         job_id = f"{job_id_prefix}{name}"
 
         if interval_expr:
@@ -311,14 +319,17 @@ class Scheduler:
         self._scheduler.add_job(
             self._run_job, trigger=trigger, id=job_id, name=name, replace_existing=True,
             kwargs={"job_name": name, "prompt": prompt, "working_dir": working_dir,
-                    "session": session, "delivery": delivery_dict},
+                    "session": session, "delivery": delivery_dict, "model": model},
         )
-        logger.info("Added job: %s (%s, session=%s)", name, schedule_label, session)
+        model_label = f" model={model}" if model else ""
+        logger.info("Added job: %s (%s, session=%s%s)", name, schedule_label, session, model_label)
         return job_id
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,
-                       session: str = "chat", delivery: dict | None = None) -> None:
-        logger.info("Executing scheduled job: %s (session=%s)", job_name, session)
+                       session: str = "chat", delivery: dict | None = None,
+                       model: str = "") -> None:
+        logger.info("Executing scheduled job: %s (session=%s, model=%s)",
+                    job_name, session, model or "default")
         delivery_obj = JobDelivery(**delivery) if delivery else None
         session_id = self.session_manager.get_session_id(session)
         max_retries = 3
@@ -326,6 +337,7 @@ class Scheduler:
             try:
                 result_text, new_session_id = await self.bridge.send_simple(
                     prompt, session_id=session_id, working_dir=working_dir,
+                    model=model or None,
                 )
                 if new_session_id:
                     self.session_manager.set_session_id(new_session_id, session)
