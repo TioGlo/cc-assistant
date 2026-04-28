@@ -15,6 +15,8 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -124,14 +126,19 @@ class DiscordBot:
 
         # Extract the prompt — strip mentions of the bot
         text = self._clean_message_text(message)
-        if not text:
+
+        # Save any image attachments to the workspace inbox and append
+        # [photo: <path>] markers to the prompt so the agent can read them.
+        photo_markers = await self._save_image_attachments(message)
+        if not text and not photo_markers:
             return
 
         # Prefix with transport+channel so Claude sees what surface this came
         # from. Plain text without a prefix = Telegram direct (matches the
         # existing convention where voice messages get a "[voice] " prefix).
         channel_name = getattr(message.channel, "name", str(message.channel.id))
-        text = f"[discord:#{channel_name}] {text}"
+        body = " ".join(part for part in (text, *photo_markers) if part)
+        text = f"[discord:#{channel_name}] {body}"
 
         session_key = f"discord:{message.channel.id}"
         logger.info(
@@ -146,6 +153,37 @@ class DiscordBot:
             send_text=send_text,
             send_typing=send_typing,
         )
+
+    async def _save_image_attachments(self, message: discord.Message) -> list[str]:
+        """Save image attachments to the workspace inbox; return [photo: <path>] markers."""
+        if not message.attachments:
+            return []
+        inbox = Path.home() / ".assistant" / "workspace" / "inbox" / "photos"
+        inbox.mkdir(parents=True, exist_ok=True)
+        markers: list[str] = []
+        for attachment in message.attachments:
+            ctype = (attachment.content_type or "").lower()
+            name = attachment.filename or ""
+            is_image = ctype.startswith("image/") or any(
+                name.lower().endswith(ext) for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")
+            )
+            if not is_image:
+                continue
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            suffix = ""
+            if "." in name:
+                suffix = "." + name.rsplit(".", 1)[-1].lower()
+            elif "/" in ctype:
+                suffix = "." + ctype.split("/", 1)[1]
+            photo_path = inbox / f"discord-{ts}-{attachment.id}{suffix}"
+            try:
+                await attachment.save(photo_path)
+            except (discord.HTTPException, OSError):
+                logger.exception("Discord attachment save failed: %s", attachment.filename)
+                continue
+            logger.info("Discord photo saved: %s", photo_path)
+            markers.append(f"[photo: {photo_path}]")
+        return markers
 
     def _clean_message_text(self, message: discord.Message) -> str:
         """Strip mentions of the bot and return the user's intended prompt."""

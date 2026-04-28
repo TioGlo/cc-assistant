@@ -119,6 +119,8 @@ class AssistantBot:
         clean_text = strip_commands(result_text)
         if not clean_text:
             return
+        if clean_text.strip().upper() in ("HEARTBEAT_OK", "NO_REPLY"):
+            return
 
         # Route based on delivery
         if delivery and delivery.transport == "discord" and delivery.channel_id:
@@ -479,6 +481,47 @@ class AssistantBot:
             if typing_task is not None:
                 typing_task.cancel()
 
+    async def handle_photo_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Save a Telegram photo (or image document) to the workspace inbox and route a synthesized text prompt through the message pipeline so the agent can read the file."""
+        if not self._is_owner(update):
+            return
+
+        message = update.message
+        file_id = None
+        suffix = ".jpg"
+        if message.photo:
+            # Largest available size is last in the list
+            file_id = message.photo[-1].file_id
+        elif message.document and (message.document.mime_type or "").startswith("image/"):
+            file_id = message.document.file_id
+            name = message.document.file_name or ""
+            if "." in name:
+                suffix = "." + name.rsplit(".", 1)[-1].lower()
+        if not file_id:
+            return
+
+        chat_id = update.effective_chat.id
+        await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        inbox = Path.home() / ".assistant" / "workspace" / "inbox" / "photos"
+        inbox.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        photo_path = inbox / f"photo-{ts}{suffix}"
+        try:
+            file = await context.bot.get_file(file_id)
+            await file.download_to_drive(photo_path)
+        except Exception as e:
+            logger.exception("Photo download failed")
+            await update.message.reply_text(f"Couldn't save that image — {e}")
+            return
+
+        caption = (message.caption or "").strip()
+        prompt = f"[photo: {photo_path}]"
+        if caption:
+            prompt += f" {caption}"
+        logger.info("Photo saved (%s): %s", photo_path.name, caption[:80] or "(no caption)")
+        await self._process_user_text(prompt, update)
+
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Transcribe a Telegram voice note and route the text through handle_message."""
         if not self._is_owner(update):
@@ -632,6 +675,11 @@ class AssistantBot:
 
         # Voice messages — transcribed and routed through handle_message
         self.app.add_handler(MessageHandler(filters.VOICE, self.handle_voice_message))
+
+        # Photo / image-document messages — saved to inbox, path passed through handle_message
+        self.app.add_handler(
+            MessageHandler(filters.PHOTO | filters.Document.IMAGE, self.handle_photo_message)
+        )
 
         # Catch-all for regular messages
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
