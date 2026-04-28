@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import paths
+from . import paths, telegram_log
 from .bridge import AuthError, BridgeError, ClaudeBridge
 from .config import Config, JobDelivery
 from .formatter import (
@@ -49,6 +49,7 @@ class AssistantBot:
         self.scheduler = scheduler
         self.tmux = TmuxDispatch(config.cc_agents or None)
         self._start_time = time.time()
+        self._last_user_msg_time = datetime.now()
         self.app: Application | None = None
         self.voice_engine: TranscriptionEngine | None = None
         # Set later by main.py via set_discord_bot(); used to route
@@ -137,6 +138,7 @@ class AssistantBot:
         chat_id = self.config.telegram.owner_id
         header = f"**Scheduled: {job_name}**\n\n"
         await self._send_text(chat_id, header + clean_text)
+        telegram_log.append(job_name, clean_text)
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
@@ -145,10 +147,14 @@ class AssistantBot:
             logger.info("Cron job delegating task: %s", cmd.task[:80])
             try:
                 status = await self.tmux.dispatch(task, timeout=cmd.timeout, session=session)
-                await self._send_text(self.config.telegram.owner_id, f"Delegated: {status}")
+                msg = f"Delegated: {status}"
+                await self._send_text(self.config.telegram.owner_id, msg)
+                telegram_log.append("delegation", msg)
             except Exception as e:
                 logger.exception("Cron delegation failed")
-                await self._send_text(self.config.telegram.owner_id, f"Delegation failed: {e}")
+                msg = f"Delegation failed: {e}"
+                await self._send_text(self.config.telegram.owner_id, msg)
+                telegram_log.append("delegation", msg)
 
     def _enrich_with_project(self, task: str, project: str) -> str:
         """If a project name is given, prepend its summary to the task description."""
@@ -422,6 +428,17 @@ class AssistantBot:
         """Telegram-specific entrypoint — wraps the transport-agnostic core."""
         chat_id = update.effective_chat.id
 
+        # Prepend recent non-chat Telegram activity so main Qu sees what
+        # cron jobs posted between user turns. Only fires when something
+        # has happened since the last user message.
+        recent = telegram_log.entries_since(
+            self._last_user_msg_time, exclude_sources={"chat"},
+        )
+        prefix = telegram_log.render_for_prompt(recent)
+        if prefix:
+            text = f"{prefix}\n\n---\n\n{text}"
+        self._last_user_msg_time = datetime.now()
+
         async def send_text(chunk: str) -> None:
             await self._reply(update, chunk)
 
@@ -431,11 +448,13 @@ class AssistantBot:
         await self.process_text_input(
             text=text, session_key="chat",
             send_text=send_text, send_typing=send_typing,
+            telegram_log_source="chat",
         )
 
     async def process_text_input(
         self, text: str, session_key: str,
         send_text, send_typing=None,
+        telegram_log_source: str | None = None,
     ) -> None:
         """Transport-agnostic core: run text through the LLM, send the reply,
         process embedded commands/delegations.
@@ -446,6 +465,9 @@ class AssistantBot:
         - send_text(chunk): async callable that sends a chunk to the user
         - send_typing(): optional async callable that pulses a typing indicator
           until cancelled
+        - telegram_log_source: if set, append the response to the shared
+          Telegram log under this source label (Telegram only — Discord
+          replies skip it since the log is Telegram-specific).
         """
         typing_task = asyncio.create_task(send_typing()) if send_typing else None
         try:
@@ -469,6 +491,8 @@ class AssistantBot:
             if clean_text:
                 for chunk in split_message(clean_text):
                     await send_text(chunk)
+                if telegram_log_source:
+                    telegram_log.append(telegram_log_source, clean_text)
         except AuthError as e:
             logger.error("Auth failure: %s", e)
             await send_text("Authentication expired. Run `claude auth login` on the server.")
