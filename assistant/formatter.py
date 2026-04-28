@@ -45,9 +45,13 @@ def to_telegram_markdown(text: str) -> str:
 @dataclass
 class ScheduleCommand:
     name: str
-    prompt: str
-    cron: str
+    cron: str = ""
+    interval: str = ""
+    prompt: str = ""        # LLM-mediated job
+    command: str = ""       # bash command — mutually exclusive with prompt
     working_dir: str | None = None
+    timeout_seconds: int = 60
+    silent_on_empty: bool = True
 
 
 @dataclass
@@ -94,8 +98,14 @@ def extract_schedule_commands(text: str) -> list[ScheduleCommand]:
         try:
             data = json.loads(match.group(1))
             commands.append(ScheduleCommand(
-                name=data["name"], prompt=data["prompt"], cron=data["cron"],
+                name=data["name"],
+                cron=data.get("cron", ""),
+                interval=data.get("interval", ""),
+                prompt=data.get("prompt", ""),
+                command=data.get("command", ""),
                 working_dir=data.get("working_dir"),
+                timeout_seconds=int(data.get("timeout_seconds", 60)),
+                silent_on_empty=bool(data.get("silent_on_empty", True)),
             ))
         except (json.JSONDecodeError, KeyError):
             pass

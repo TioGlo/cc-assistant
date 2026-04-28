@@ -53,19 +53,26 @@ class JobDelivery:
 @dataclass
 class ScheduledJob:
     name: str
-    prompt: str
+    prompt: str = ""               # LLM-mediated job (sent to claude -p)
+    command: str = ""              # bash command run via subprocess; mutually exclusive with prompt
     cron: str | None = None        # 5-field cron expression (e.g. "0 9 * * *")
     interval: str | None = None    # interval expression (e.g. "55m", "2h", "30s") — mutually exclusive with cron
     working_dir: str | None = None
-    session: str = "chat"  # session key in session.json; jobs with the same key share context
+    session: str = "chat"  # session key in session.json; jobs with the same key share context (ignored when command is set)
     delivery: JobDelivery | None = None  # default: Telegram owner
-    model: str = ""        # passed to claude -p as --model; empty = inherit claude.model
+    model: str = ""        # passed to claude -p as --model; empty = inherit claude.model (ignored when command is set)
+    timeout_seconds: int = 60      # subprocess timeout for command-type jobs
+    silent_on_empty: bool = True   # for command jobs, skip delivery if stdout is empty and exit==0
 
     def __post_init__(self):
         if not self.cron and not self.interval:
             raise ValueError(f"job '{self.name}' must set either `cron` or `interval`")
         if self.cron and self.interval:
             raise ValueError(f"job '{self.name}' sets both `cron` and `interval`; pick one")
+        if not self.prompt and not self.command:
+            raise ValueError(f"job '{self.name}' must set either `prompt` or `command`")
+        if self.prompt and self.command:
+            raise ValueError(f"job '{self.name}' sets both `prompt` and `command`; pick one")
         if isinstance(self.delivery, dict):
             self.delivery = JobDelivery(**self.delivery)
         if self.delivery and self.delivery.transport == "discord" and not self.delivery.channel_id:

@@ -106,11 +106,21 @@ class Scheduler:
                             working_dir: str | None = None, session: str = "chat",
                             interval_expr: str | None = None,
                             delivery: JobDelivery | None = None,
-                            model: str = "") -> None:
+                            model: str = "",
+                            command: str = "",
+                            timeout_seconds: int = 60,
+                            silent_on_empty: bool = True) -> None:
         jobs = self._load_dynamic_jobs()
         jobs = [j for j in jobs if j["name"] != name]
-        entry = {"name": name, "prompt": prompt,
+        entry = {"name": name,
                  "working_dir": working_dir, "created_at": datetime.now().isoformat()}
+        if command:
+            entry["command"] = command
+            entry["timeout_seconds"] = timeout_seconds
+            if not silent_on_empty:
+                entry["silent_on_empty"] = False
+        else:
+            entry["prompt"] = prompt
         if cron_expr:
             entry["cron"] = cron_expr
         if interval_expr:
@@ -179,7 +189,10 @@ class Scheduler:
                                          job.working_dir, session=job.session,
                                          interval_expr=job.interval,
                                          delivery=job.delivery,
-                                         model=job.model)
+                                         model=job.model,
+                                         command=job.command,
+                                         timeout_seconds=job.timeout_seconds,
+                                         silent_on_empty=job.silent_on_empty)
                 seeded += 1
                 schedule = job.cron or f"interval={job.interval}"
                 logger.info("Seeded job from config: %s (%s)", job.name, schedule)
@@ -193,12 +206,15 @@ class Scheduler:
             if job_id not in {j.id for j in self._scheduler.get_jobs()}:
                 delivery_raw = job.get("delivery")
                 delivery = JobDelivery(**delivery_raw) if delivery_raw else None
-                self._add_to_scheduler(job["name"], job["prompt"], job.get("cron"),
+                self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
                                        job.get("working_dir"), session=job.get("session", "chat"),
                                        job_id_prefix="job_",
                                        interval_expr=job.get("interval"),
                                        delivery=delivery,
-                                       model=job.get("model", ""))
+                                       model=job.get("model", ""),
+                                       command=job.get("command", ""),
+                                       timeout_seconds=int(job.get("timeout_seconds", 60)),
+                                       silent_on_empty=bool(job.get("silent_on_empty", True)))
                 schedule = job.get("cron") or f"interval={job.get('interval')}"
                 target = (delivery.transport if delivery else "telegram")
                 model_label = f" model={job['model']}" if job.get("model") else ""
@@ -222,12 +238,15 @@ class Scheduler:
             delivery_raw = job.get("delivery")
             delivery = JobDelivery(**delivery_raw) if delivery_raw else None
             existing = job_id in before_jobs
-            self._add_to_scheduler(job["name"], job["prompt"], job.get("cron"),
+            self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
                                    job.get("working_dir"), session=job.get("session", "chat"),
                                    job_id_prefix="job_",
                                    interval_expr=job.get("interval"),
                                    delivery=delivery,
-                                   model=job.get("model", ""))
+                                   model=job.get("model", ""),
+                                   command=job.get("command", ""),
+                                   timeout_seconds=int(job.get("timeout_seconds", 60)),
+                                   silent_on_empty=bool(job.get("silent_on_empty", True)))
             if existing:
                 replaced += 1
             else:
@@ -312,14 +331,36 @@ class Scheduler:
 
     # -- Public API --
 
-    def add_cron_job(self, name: str, prompt: str, cron_expr: str,
+    def add_cron_job(self, name: str, prompt: str, cron_expr: str | None,
                      working_dir: str | None = None, session: str = "chat",
-                     delivery: JobDelivery | None = None) -> str:
+                     delivery: JobDelivery | None = None,
+                     interval_expr: str | None = None,
+                     command: str = "",
+                     timeout_seconds: int = 60,
+                     silent_on_empty: bool = True,
+                     model: str = "") -> str:
+        if command and prompt:
+            raise ValueError(f"job '{name}' sets both prompt and command")
+        if not command and not prompt:
+            raise ValueError(f"job '{name}' must set either prompt or command")
+        # Auto-isolate session per model (mirrors ScheduledJob.__post_init__).
+        if model and session == "chat" and not command:
+            session = f"chat-{model}"
         job_id = self._add_to_scheduler(name, prompt, cron_expr, working_dir,
                                         session=session, job_id_prefix="job_",
-                                        delivery=delivery)
+                                        interval_expr=interval_expr,
+                                        delivery=delivery,
+                                        model=model,
+                                        command=command,
+                                        timeout_seconds=timeout_seconds,
+                                        silent_on_empty=silent_on_empty)
         self._append_dynamic_job(name, prompt, cron_expr, working_dir, session=session,
-                                 delivery=delivery)
+                                 interval_expr=interval_expr,
+                                 delivery=delivery,
+                                 model=model,
+                                 command=command,
+                                 timeout_seconds=timeout_seconds,
+                                 silent_on_empty=silent_on_empty)
         return job_id
 
     def add_one_shot(self, prompt: str, delay: str, working_dir: str | None = None,
@@ -356,11 +397,17 @@ class Scheduler:
         return removed
 
     def list_jobs(self) -> list[dict]:
-        return [{
-            "id": j.id, "name": j.name,
-            "next_run": j.next_run_time.strftime("%Y-%m-%d %H:%M:%S") if j.next_run_time else "paused",
-            "prompt": j.kwargs.get("prompt", "")[:100],
-        } for j in self._scheduler.get_jobs()]
+        out = []
+        for j in self._scheduler.get_jobs():
+            cmd = j.kwargs.get("command", "")
+            prompt = j.kwargs.get("prompt", "")
+            out.append({
+                "id": j.id, "name": j.name,
+                "next_run": j.next_run_time.strftime("%Y-%m-%d %H:%M:%S") if j.next_run_time else "paused",
+                "kind": "command" if cmd else "prompt",
+                "prompt": (cmd if cmd else prompt)[:100],
+            })
+        return out
 
     # -- Internal --
 
@@ -369,7 +416,10 @@ class Scheduler:
                           job_id_prefix: str = "user_",
                           interval_expr: str | None = None,
                           delivery: JobDelivery | None = None,
-                          model: str = "") -> str:
+                          model: str = "",
+                          command: str = "",
+                          timeout_seconds: int = 60,
+                          silent_on_empty: bool = True) -> str:
         job_id = f"{job_id_prefix}{name}"
 
         if interval_expr:
@@ -394,14 +444,85 @@ class Scheduler:
             {"transport": delivery.transport, "channel_id": delivery.channel_id}
             if delivery else None
         )
+        kwargs = {"job_name": name, "working_dir": working_dir,
+                  "delivery": delivery_dict}
+        if command:
+            kwargs["command"] = command
+            kwargs["timeout_seconds"] = timeout_seconds
+            kwargs["silent_on_empty"] = silent_on_empty
+            target = self._run_command_job
+            kind_label = "command"
+        else:
+            kwargs["prompt"] = prompt
+            kwargs["session"] = session
+            kwargs["model"] = model
+            target = self._run_job
+            kind_label = "prompt"
         self._scheduler.add_job(
-            self._run_job, trigger=trigger, id=job_id, name=name, replace_existing=True,
-            kwargs={"job_name": name, "prompt": prompt, "working_dir": working_dir,
-                    "session": session, "delivery": delivery_dict, "model": model},
+            target, trigger=trigger, id=job_id, name=name, replace_existing=True,
+            kwargs=kwargs,
         )
-        model_label = f" model={model}" if model else ""
-        logger.info("Added job: %s (%s, session=%s%s)", name, schedule_label, session, model_label)
+        if command:
+            extra = " command"
+        else:
+            extra = f" session={session}"
+            if model:
+                extra += f" model={model}"
+        logger.info("Added %s job: %s (%s,%s)", kind_label, name, schedule_label, extra)
         return job_id
+
+    async def _run_command_job(self, job_name: str, command: str,
+                               working_dir: str | None = None,
+                               delivery: dict | None = None,
+                               timeout_seconds: int = 60,
+                               silent_on_empty: bool = True) -> None:
+        """Run a bash command directly. No LLM in the path. Output (or error)
+        flows through the same delivery callback as prompt-type jobs."""
+        logger.info("Executing command job: %s -> %s", job_name, command[:200])
+        delivery_obj = JobDelivery(**delivery) if delivery else None
+        cwd = str(Path(working_dir).expanduser()) if working_dir else None
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                proc.kill()
+                msg = f"⏱ `{job_name}` timed out after {timeout_seconds}s"
+                if self._callback:
+                    await self._callback(job_name, msg, delivery_obj)
+                return
+        except Exception as e:
+            logger.exception("Command job %s failed to spawn", job_name)
+            if self._callback:
+                await self._callback(job_name, f"❌ `{job_name}` spawn failed: {e}", delivery_obj)
+            return
+
+        out = stdout.decode(errors="replace").strip()
+        err = stderr.decode(errors="replace").strip()
+        rc = proc.returncode
+
+        if rc != 0:
+            tail = (err or out or "(no output)")[-1500:]
+            msg = f"❌ `{job_name}` exit {rc}\n```\n{tail}\n```"
+        elif not out:
+            if silent_on_empty:
+                logger.info("Command job %s produced no output; skipping delivery", job_name)
+                return
+            msg = f"✅ `{job_name}` (no output)"
+        elif "\n" in out or len(out) > 200:
+            msg = f"```\n{out[-3500:]}\n```"
+        else:
+            msg = out
+
+        if self._callback:
+            await self._callback(job_name, msg, delivery_obj)
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,
                        session: str = "chat", delivery: dict | None = None,

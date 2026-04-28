@@ -76,7 +76,7 @@ To delegate with project context auto-prepended:
 
 ## Scheduling
 
-To schedule recurring work:
+To schedule recurring work driven by an LLM prompt:
 ```
 <!--SCHEDULE:{"name":"task-name","prompt":"what to do","cron":"0 8 * * *"}-->
 ```
@@ -85,6 +85,12 @@ To schedule a one-shot delayed task:
 ```
 <!--REMIND:{"prompt":"what to do","delay":"2h"}-->
 ```
+
+For deterministic work that needs no LLM (zero tokens), use `command:` instead of `prompt:`:
+```
+<!--SCHEDULE:{"name":"disk-check","command":"df -h / | tail -1","cron":"0 6 * * *"}-->
+```
+Optional fields on command jobs: `timeout_seconds` (default 60), `silent_on_empty` (default true). Stdout flows to the normal delivery channel (Telegram by default). Errors and timeouts are always reported. `/jobs` shows command jobs with a ⚙️ icon vs 🤖 for prompt jobs.
 
 ### Where scheduled jobs live (and why)
 

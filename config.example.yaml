@@ -100,6 +100,15 @@ scheduler:
   #   conversations built under different models.
   #   Rule of thumb: routing/templating prompts → haiku; structured tool use
   #   and short synthesis → sonnet; reserve opus for live thinking.
+  #
+  # `command` (no LLM in the loop):
+  #   For deterministic work, set `command:` instead of `prompt:`. The bot
+  #   runs the command via `bash -c`, captures stdout/stderr, and delivers
+  #   the output through the normal Telegram/Discord pipeline. Zero tokens.
+  #   Optional fields: `timeout_seconds` (default 60), `silent_on_empty`
+  #   (default true — skip delivery when stdout is empty and exit==0).
+  #   Errors and timeouts are always reported. Use this for log rotation,
+  #   health checks, ccusage reports, anything that doesn't need judgment.
   jobs:
     - name: "heartbeat"
       prompt: "Read the HEARTBEAT.md in your workspace and follow its instructions."
@@ -114,6 +123,13 @@ scheduler:
   #   prompt: "Use the @email-triager subagent to triage the inbox."
   #   cron: "0 9,14,19 * * *"
   #   model: "haiku"           # pure routing — Haiku is fine
+  # - name: "disk-check"
+  #   command: "df -h / | tail -1"   # pure bash, no LLM, zero tokens
+  #   cron: "0 6 * * *"
+  #   timeout_seconds: 30
+  # - name: "cache-ratio-report"
+  #   command: "/path/to/scripts/cache-ratio-report.sh"
+  #   cron: "30 23 * * *"
   # - name: "research-digest"
   #   prompt: "Check AI news sources and summarize what's new."
   #   cron: "0 7 * * *"

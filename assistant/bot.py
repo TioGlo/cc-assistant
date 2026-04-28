@@ -234,7 +234,10 @@ class AssistantBot:
         if not jobs:
             await update.message.reply_text("No scheduled jobs.")
             return
-        lines = [f"- {j['name']} (next: {j['next_run']})\n  {j['prompt']}" for j in jobs]
+        lines = []
+        for j in jobs:
+            icon = "⚙️" if j.get("kind") == "command" else "🤖"
+            lines.append(f"{icon} {j['name']} (next: {j['next_run']})\n  {j['prompt']}")
         await update.message.reply_text("\n".join(lines))
 
     async def cmd_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -523,8 +526,18 @@ class AssistantBot:
 
     def _process_commands(self, text: str) -> None:
         for cmd in extract_schedule_commands(text):
-            self.scheduler.add_cron_job(cmd.name, cmd.prompt, cmd.cron, cmd.working_dir)
-            logger.info("Claude scheduled cron job: %s", cmd.name)
+            try:
+                self.scheduler.add_cron_job(
+                    cmd.name, cmd.prompt, cmd.cron or None, cmd.working_dir,
+                    interval_expr=(cmd.interval or None),
+                    command=cmd.command,
+                    timeout_seconds=cmd.timeout_seconds,
+                    silent_on_empty=cmd.silent_on_empty,
+                )
+                kind = "command" if cmd.command else "prompt"
+                logger.info("Claude scheduled %s job: %s", kind, cmd.name)
+            except Exception as e:
+                logger.warning("Invalid SCHEDULE block (%s): %s", cmd.name, e)
         for cmd in extract_remind_commands(text):
             try:
                 self.scheduler.add_one_shot(cmd.prompt, cmd.delay)
