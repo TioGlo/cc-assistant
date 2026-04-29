@@ -32,6 +32,13 @@ claude:
   max_turns: 50
   # Timeout in seconds for each claude invocation
   timeout: 300
+  # --effort for chat-surface invocations only (Telegram + Discord). Empty
+  # = let claude pick (xhigh on Opus 4.7, high on Opus 4.6/Sonnet 4.6).
+  # Set "low" for a routing-style assistant where deep thinking is
+  # delegated to tmux agents via DELEGATE blocks. Cron jobs intentionally
+  # don't read this — they win via cheaper models, layering low effort
+  # on Sonnet/Haiku would hurt quality.
+  chat_effort: ""
   # Optional: path to MCP server config JSON file
   # mcp_config: "/path/to/mcp.json"
 

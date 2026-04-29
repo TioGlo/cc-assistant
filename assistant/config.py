@@ -22,6 +22,7 @@ class ClaudeConfig:
     max_turns: int = 50
     timeout: int = 300
     mcp_config: str | None = None
+    chat_effort: str = ""  # --effort for chat-surface invocations (Telegram/Discord); empty = use model default. Cron jobs intentionally don't read this — they win via cheaper models, layering low effort on Sonnet/Haiku would hurt quality.
 
 
 @dataclass

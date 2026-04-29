@@ -27,7 +27,7 @@ class ClaudeBridge:
         self.workspace = workspace
 
     def _build_args(self, message: str, session_id: str | None = None,
-                    model: str | None = None) -> list[str]:
+                    model: str | None = None, effort: str | None = None) -> list[str]:
         args = [
             "claude", "-p", message,
             "--output-format", "json",
@@ -35,6 +35,8 @@ class ClaudeBridge:
             "--model", model or self.config.model,
             "--max-turns", str(self.config.max_turns),
         ]
+        if effort:
+            args.extend(["--effort", effort])
         if session_id:
             args.extend(["--resume", session_id])
         system_prompt = self.config.system_prompt or ""
@@ -55,12 +57,12 @@ class ClaudeBridge:
 
     async def send_simple(
         self, message: str, session_id: str | None = None, working_dir: str | None = None,
-        model: str | None = None,
+        model: str | None = None, effort: str | None = None,
     ) -> tuple[str, str | None]:
         cwd = Path(working_dir).expanduser() if working_dir else self.workspace
         cwd.mkdir(parents=True, exist_ok=True)
 
-        args = self._build_args(message, session_id, model=model)
+        args = self._build_args(message, session_id, model=model, effort=effort)
         logger.debug("Spawning: %s (cwd=%s)", " ".join(args[:6]) + "...", cwd)
 
         proc = await asyncio.create_subprocess_exec(

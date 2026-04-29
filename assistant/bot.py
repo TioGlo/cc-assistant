@@ -474,15 +474,18 @@ class AssistantBot:
         typing_task = asyncio.create_task(send_typing()) if send_typing else None
         try:
             session_id = self.session_manager.get_session_id(session_key)
+            chat_effort = self.config.claude.chat_effort or None
             try:
                 response_text, new_session_id = await self.bridge.send_simple(
-                    text, session_id=session_id,
+                    text, session_id=session_id, effort=chat_effort,
                 )
             except BridgeError as e:
                 if session_id and "No conversation found" in str(e):
                     logger.info("Stale session %s, falling back to fresh", session_key)
                     self.session_manager.clear_session(session_key)
-                    response_text, new_session_id = await self.bridge.send_simple(text)
+                    response_text, new_session_id = await self.bridge.send_simple(
+                        text, effort=chat_effort,
+                    )
                 else:
                     raise
             if new_session_id:
