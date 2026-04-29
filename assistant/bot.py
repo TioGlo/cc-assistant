@@ -527,7 +527,7 @@ class AssistantBot:
         chat_id = update.effective_chat.id
         await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        inbox = Path.home() / ".assistant" / "workspace" / "inbox" / "photos"
+        inbox = paths.workspace() / "inbox" / "photos"
         inbox.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         photo_path = inbox / f"photo-{ts}{suffix}"

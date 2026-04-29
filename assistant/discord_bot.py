@@ -16,11 +16,11 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
 
+from . import paths
 from .config import DiscordConfig
 from .formatter import split_message
 
@@ -158,7 +158,7 @@ class DiscordBot:
         """Save image attachments to the workspace inbox; return [photo: <path>] markers."""
         if not message.attachments:
             return []
-        inbox = Path.home() / ".assistant" / "workspace" / "inbox" / "photos"
+        inbox = paths.workspace() / "inbox" / "photos"
         inbox.mkdir(parents=True, exist_ok=True)
         markers: list[str] = []
         for attachment in message.attachments:
