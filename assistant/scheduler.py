@@ -200,8 +200,15 @@ class Scheduler:
             logger.info("Seeded %d new jobs from config.yaml", seeded)
 
     def load_jobs(self) -> None:
-        """Load all jobs from the dynamic jobs file into the scheduler."""
+        """Load all jobs from the dynamic jobs file into the scheduler.
+
+        Jobs with `enabled: false` are skipped — entry stays on disk but
+        no scheduling happens, so flipping the flag back is reversible.
+        """
         for job in self._load_dynamic_jobs():
+            if not job.get("enabled", True):
+                logger.info("Skipping disabled job: %s", job.get("name"))
+                continue
             job_id = f"job_{job['name']}"
             if job_id not in {j.id for j in self._scheduler.get_jobs()}:
                 delivery_raw = job.get("delivery")
@@ -232,7 +239,13 @@ class Scheduler:
         target_jobs = set()
         added = 0
         replaced = 0
+        skipped = 0
         for job in self._load_dynamic_jobs():
+            if not job.get("enabled", True):
+                # Disabled jobs are intentionally absent from target_jobs so
+                # they fall into removed_jobs below if previously running.
+                skipped += 1
+                continue
             job_id = f"job_{job['name']}"
             target_jobs.add(job_id)
             delivery_raw = job.get("delivery")
@@ -297,6 +310,7 @@ class Scheduler:
             "jobs_added": added,
             "jobs_replaced": replaced,
             "jobs_removed": len(removed_jobs),
+            "jobs_skipped": skipped,
             "reminders_loaded": reminder_added,
             "reminders_expired": reminder_dropped,
         }

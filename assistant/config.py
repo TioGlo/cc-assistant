@@ -63,6 +63,7 @@ class ScheduledJob:
     model: str = ""        # passed to claude -p as --model; empty = inherit claude.model (ignored when command is set)
     timeout_seconds: int = 60      # subprocess timeout for command-type jobs
     silent_on_empty: bool = True   # for command jobs, skip delivery if stdout is empty and exit==0
+    enabled: bool = True           # set false to keep the job entry but skip scheduling (reversible pause)
 
     def __post_init__(self):
         if not self.cron and not self.interval:
