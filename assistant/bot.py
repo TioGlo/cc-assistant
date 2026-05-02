@@ -24,6 +24,7 @@ from .formatter import (
     extract_schedule_commands,
     split_message,
     strip_commands,
+    strip_markdown,
     to_telegram_markdown,
 )
 from .scheduler import Scheduler
@@ -86,7 +87,7 @@ class AssistantBot:
             )
         except Exception as e:
             logger.debug("Markdown send failed (%s); falling back to plain", e)
-            await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+            await self.app.bot.send_message(chat_id=chat_id, text=strip_markdown(chunk))
 
     async def _reply(self, update: Update, text: str) -> None:
         """update.message.reply_text with Markdown + plain fallback."""
@@ -96,7 +97,7 @@ class AssistantBot:
             )
         except Exception as e:
             logger.debug("Markdown reply failed (%s); falling back to plain", e)
-            await update.message.reply_text(text)
+            await update.message.reply_text(strip_markdown(text))
 
     # -- Discord wiring --
 

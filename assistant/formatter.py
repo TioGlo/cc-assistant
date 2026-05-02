@@ -42,6 +42,31 @@ def to_telegram_markdown(text: str) -> str:
     return "".join(out)
 
 
+def strip_markdown(text: str) -> str:
+    """Strip markdown markers for the plain-text fallback path.
+
+    When Telegram's strict Markdown parser rejects a message (unbalanced
+    asterisks, awkward punctuation, etc.) we fall back to plain text. The
+    original chunk still carries `**bold**` and `# header` syntax — sending
+    that raw shows the user unrendered markup. This strips those markers so
+    the fallback is at least readable. Code regions are preserved verbatim.
+    """
+    parts = _CODE_REGION_PATTERN.split(text)
+    out: list[str] = []
+    for part in parts:
+        if part.startswith("`"):
+            out.append(part)
+            continue
+        # **bold** → bold (strip both pairs)
+        part = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", part)
+        # *italic*/single-* bold → strip wrappers
+        part = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", part)
+        # Headers (#, ##, ###...) → just the header text
+        part = re.sub(r"(?m)^#{1,6}\s+", "", part)
+        out.append(part)
+    return "".join(out)
+
+
 @dataclass
 class ScheduleCommand:
     name: str
