@@ -95,8 +95,24 @@ class Scheduler:
         try:
             return json.loads(self._jobs_file.read_text())
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load dynamic jobs: %s", e)
-            return []
+            # Refuse to proceed on a corrupt/unreadable jobs file. The previous
+            # behavior was to log a warning and return []; downstream
+            # seed_config_jobs() then treated the file as empty and overwrote
+            # it with config.yaml seeds, silently destroying any dynamic-only
+            # jobs (jobs created via /schedule or SCHEDULE blocks that don't
+            # have a config.yaml counterpart). The fix: surface the error
+            # loudly so the operator can repair the file before the service
+            # comes back up. Any data loss on this code path is a regression
+            # we cannot fix later — recovery requires the file's contents.
+            raise RuntimeError(
+                f"scheduler-jobs.json is unreadable or malformed: {e}\n"
+                f"  Path: {self._jobs_file}\n"
+                f"  The service refuses to start to prevent overwriting the\n"
+                f"  file with empty config seeds (which would destroy any\n"
+                f"  dynamic-only jobs). Inspect the file, fix the JSON, and\n"
+                f"  restart. If you can't recover it, copy a backup over the\n"
+                f"  corrupt file before restarting."
+            ) from e
 
     def _save_dynamic_jobs(self, jobs: list[dict]) -> None:
         self._jobs_file.parent.mkdir(parents=True, exist_ok=True)
@@ -141,8 +157,16 @@ class Scheduler:
         try:
             return json.loads(self._reminders_file.read_text())
         except (json.JSONDecodeError, OSError) as e:
-            logger.warning("Failed to load reminders: %s", e)
-            return []
+            # Same data-loss class as _load_dynamic_jobs above: silently
+            # treating a corrupt file as empty and rewriting it would erase
+            # every pending reminder. Refuse instead.
+            raise RuntimeError(
+                f"scheduler-reminders.json is unreadable or malformed: {e}\n"
+                f"  Path: {self._reminders_file}\n"
+                f"  The service refuses to start. Inspect the file, fix the\n"
+                f"  JSON (or move it aside if losing pending reminders is\n"
+                f"  acceptable), and restart."
+            ) from e
 
     def _save_reminders(self, reminders: list[dict]) -> None:
         self._reminders_file.parent.mkdir(parents=True, exist_ok=True)
