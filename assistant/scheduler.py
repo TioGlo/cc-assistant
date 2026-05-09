@@ -75,13 +75,55 @@ class Scheduler:
         self._reminders_file = jobs_file.parent / "scheduler-reminders.json"
         self._callback: JobCallback | None = None
         self._scheduler = AsyncIOScheduler()
+        # mtime fingerprints of the persistence files — kept in sync with disk
+        # so the file-watcher can tell external edits (Kshana editing
+        # scheduler-jobs.json by hand) apart from in-process saves.
+        self._jobs_file_mtime: float = 0.0
+        self._reminders_file_mtime: float = 0.0
 
     def set_callback(self, callback: JobCallback) -> None:
         self._callback = callback
 
     def start(self) -> None:
         self._scheduler.start()
+        # Seed mtimes so the first watcher tick doesn't trigger a spurious reload.
+        self._jobs_file_mtime = self._mtime(self._jobs_file)
+        self._reminders_file_mtime = self._mtime(self._reminders_file)
+        # Auto-reload on external edits to scheduler-jobs.json /
+        # scheduler-reminders.json. Kshana and other agents edit these files
+        # directly, so without this watcher the live APScheduler triggers
+        # diverge from the on-disk state until /reload is invoked manually.
+        self._scheduler.add_job(
+            self._watch_files, trigger=IntervalTrigger(seconds=15),
+            id="_internal_file_watch", name="scheduler file watcher",
+            replace_existing=True,
+        )
         logger.info("Scheduler started with %d jobs", len(self._scheduler.get_jobs()))
+
+    @staticmethod
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    async def _watch_files(self) -> None:
+        """Reload if scheduler-jobs.json or scheduler-reminders.json changed on disk."""
+        jobs_mt = self._mtime(self._jobs_file)
+        rem_mt = self._mtime(self._reminders_file)
+        if jobs_mt == self._jobs_file_mtime and rem_mt == self._reminders_file_mtime:
+            return
+        logger.info("Scheduler files changed on disk (jobs %s→%s, reminders %s→%s); reloading",
+                    self._jobs_file_mtime, jobs_mt,
+                    self._reminders_file_mtime, rem_mt)
+        try:
+            self.reload()
+        except Exception:
+            logger.exception("Auto-reload failed")
+        # Always refresh the fingerprints — even on a failed reload — so we
+        # don't tight-loop reloading a corrupt file every 15 seconds.
+        self._jobs_file_mtime = self._mtime(self._jobs_file)
+        self._reminders_file_mtime = self._mtime(self._reminders_file)
 
     def stop(self) -> None:
         if self._scheduler.running:
@@ -117,6 +159,9 @@ class Scheduler:
     def _save_dynamic_jobs(self, jobs: list[dict]) -> None:
         self._jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self._jobs_file.write_text(json.dumps(jobs, indent=2))
+        # Update fingerprint so the watcher doesn't treat our own write as an
+        # external edit and trigger a redundant reload.
+        self._jobs_file_mtime = self._mtime(self._jobs_file)
 
     def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str | None,
                             working_dir: str | None = None, session: str = "chat",
@@ -171,6 +216,7 @@ class Scheduler:
     def _save_reminders(self, reminders: list[dict]) -> None:
         self._reminders_file.parent.mkdir(parents=True, exist_ok=True)
         self._reminders_file.write_text(json.dumps(reminders, indent=2))
+        self._reminders_file_mtime = self._mtime(self._reminders_file)
 
     def _append_reminder(self, reminder_id: str, prompt: str, run_at: datetime,
                          session: str = "chat") -> None:
@@ -245,7 +291,8 @@ class Scheduler:
                                        model=job.get("model", ""),
                                        command=job.get("command", ""),
                                        timeout_seconds=int(job.get("timeout_seconds", 60)),
-                                       silent_on_empty=bool(job.get("silent_on_empty", True)))
+                                       silent_on_empty=bool(job.get("silent_on_empty", True)),
+                                       resume=bool(job.get("resume", False)))
                 schedule = job.get("cron") or f"interval={job.get('interval')}"
                 target = (delivery.transport if delivery else "telegram")
                 model_label = f" model={job['model']}" if job.get("model") else ""
@@ -283,7 +330,8 @@ class Scheduler:
                                    model=job.get("model", ""),
                                    command=job.get("command", ""),
                                    timeout_seconds=int(job.get("timeout_seconds", 60)),
-                                   silent_on_empty=bool(job.get("silent_on_empty", True)))
+                                   silent_on_empty=bool(job.get("silent_on_empty", True)),
+                                   resume=bool(job.get("resume", False)))
             if existing:
                 replaced += 1
             else:
@@ -457,7 +505,8 @@ class Scheduler:
                           model: str = "",
                           command: str = "",
                           timeout_seconds: int = 60,
-                          silent_on_empty: bool = True) -> str:
+                          silent_on_empty: bool = True,
+                          resume: bool = False) -> str:
         job_id = f"{job_id_prefix}{name}"
 
         if interval_expr:
@@ -494,6 +543,7 @@ class Scheduler:
             kwargs["prompt"] = prompt
             kwargs["session"] = session
             kwargs["model"] = model
+            kwargs["resume"] = resume
             target = self._run_job
             kind_label = "prompt"
         self._scheduler.add_job(
@@ -564,11 +614,16 @@ class Scheduler:
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,
                        session: str = "chat", delivery: dict | None = None,
-                       model: str = "") -> None:
-        logger.info("Executing scheduled job: %s (session=%s, model=%s)",
-                    job_name, session, model or "default")
+                       model: str = "", resume: bool = False) -> None:
+        logger.info("Executing scheduled job: %s (session=%s, model=%s, resume=%s)",
+                    job_name, session, model or "default", resume)
         delivery_obj = JobDelivery(**delivery) if delivery else None
-        session_id = self.session_manager.get_session_id(session)
+        # Stateless by default — passing session_id forces --resume which can
+        # overflow Sonnet's window once the transcript grows past ~200k tokens
+        # (claude -p does NOT auto-compact). Jobs that explicitly want
+        # cross-fire continuity must opt in via resume=true AND keep their
+        # session bounded.
+        session_id = self.session_manager.get_session_id(session) if resume else None
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -576,7 +631,10 @@ class Scheduler:
                     prompt, session_id=session_id, working_dir=working_dir,
                     model=model or None,
                 )
-                if new_session_id:
+                # Only persist the new session ID when this job is opted into
+                # resume — stateless jobs spawn a fresh session each fire and
+                # we don't want those one-shot IDs polluting session.json.
+                if resume and new_session_id:
                     self.session_manager.set_session_id(new_session_id, session)
                 if self._callback:
                     await self._callback(job_name, result_text, delivery_obj)

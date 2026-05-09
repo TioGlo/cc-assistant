@@ -65,6 +65,7 @@ class ScheduledJob:
     timeout_seconds: int = 60      # subprocess timeout for command-type jobs
     silent_on_empty: bool = True   # for command jobs, skip delivery if stdout is empty and exit==0
     enabled: bool = True           # set false to keep the job entry but skip scheduling (reversible pause)
+    resume: bool = False           # if true, pass --resume <session-id> to claude -p; defaults false (stateless cron) to avoid unbounded transcript growth → context overflow → degenerate output. Jobs that need cross-fire memory should opt in AND keep their session bounded.
 
     def __post_init__(self):
         if not self.cron and not self.interval:
