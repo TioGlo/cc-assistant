@@ -540,6 +540,15 @@ class Scheduler:
             target = self._run_command_job
             kind_label = "command"
         else:
+            # If the prompt job targets the main "chat" surface, default
+            # resume=true. Mirrors ScheduledJob.__post_init__: the main chat
+            # session is bounded by nightly session-cleanup, so cron jobs
+            # sharing it benefit from continuity with the user's interactive
+            # context without the unbounded-growth failure mode. Per-model
+            # sessions (chat-sonnet, chat-haiku) are NOT bounded by nightly
+            # reset, so the rule only fires on literal "chat".
+            if session == "chat" and not resume:
+                resume = True
             kwargs["prompt"] = prompt
             kwargs["session"] = session
             kwargs["model"] = model

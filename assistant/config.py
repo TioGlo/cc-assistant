@@ -85,6 +85,13 @@ class ScheduledJob:
         # job leaves session at the default "chat" — explicit session= still wins.
         if self.model and self.session == "chat":
             self.session = f"chat-{self.model}"
+        # If the FINAL session is the main "chat" surface, default resume=true.
+        # The main chat session is reset nightly by session-cleanup, so it stays
+        # bounded; cron jobs sharing it get continuity with the user's
+        # interactive context. Per-model sessions like "chat-sonnet" are NOT
+        # bounded by nightly reset, so the rule only fires on literal "chat".
+        if self.session == "chat" and not self.resume:
+            self.resume = True
 
 
 @dataclass
