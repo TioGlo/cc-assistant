@@ -284,7 +284,7 @@ class Scheduler:
                 delivery_raw = job.get("delivery")
                 delivery = JobDelivery(**delivery_raw) if delivery_raw else None
                 self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
-                                       job.get("working_dir"), session=job.get("session", "chat"),
+                                       job.get("working_dir"), session=(job.get("session") or "chat"),
                                        job_id_prefix="job_",
                                        interval_expr=job.get("interval"),
                                        delivery=delivery,
@@ -297,7 +297,7 @@ class Scheduler:
                 target = (delivery.transport if delivery else "telegram")
                 model_label = f" model={job['model']}" if job.get("model") else ""
                 logger.info("Loaded job: %s (%s, session=%s, target=%s%s)",
-                            job["name"], schedule, job.get("session", "chat"), target,
+                            job["name"], schedule, (job.get("session") or "chat"), target,
                             model_label)
 
     def reload(self) -> dict:
@@ -323,7 +323,7 @@ class Scheduler:
             delivery = JobDelivery(**delivery_raw) if delivery_raw else None
             existing = job_id in before_jobs
             self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
-                                   job.get("working_dir"), session=job.get("session", "chat"),
+                                   job.get("working_dir"), session=(job.get("session") or "chat"),
                                    job_id_prefix="job_",
                                    interval_expr=job.get("interval"),
                                    delivery=delivery,

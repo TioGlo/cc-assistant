@@ -30,6 +30,16 @@ class SessionManager:
         return self._cache.get(key)
 
     def set_session_id(self, session_id: str, key: str = "chat") -> None:
+        # Reject None / empty keys loudly. Python's json.dumps silently
+        # serializes a None dict key as the literal string "null", which
+        # produces a phantom "null" session entry that masks the upstream
+        # bug (a job dict with explicit "session": null defeating the
+        # call-site default). Surface it as a real error instead.
+        if not key:
+            raise ValueError(
+                f"set_session_id refused: key={key!r} is falsy. "
+                f"Caller must pass a non-empty string session key."
+            )
         self._cache[key] = session_id
         self._save()
 
