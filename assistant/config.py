@@ -49,6 +49,8 @@ class JobDelivery:
     """
     transport: str = "telegram"  # "telegram" | "discord"
     channel_id: str | int | None = None  # Discord channel ID (required if transport=="discord")
+    priority: str = "silent_log"  # Telegram default priority: "action" | "fyi" | "silent_log".
+    # Job result may override this with a <!--PRIORITY:LEVEL--> tag in the output.
 
 
 @dataclass

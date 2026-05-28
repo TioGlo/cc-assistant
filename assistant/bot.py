@@ -1,9 +1,11 @@
 import asyncio
 import importlib.util
+import json
 import logging
+import re
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import Update
@@ -33,6 +35,31 @@ from .tmux_dispatch import TmuxDispatch
 from .voice import TranscriptionEngine, get_engine
 
 logger = logging.getLogger(__name__)
+
+# Telegram-priority routing. See projects/telegram-streamlining/ for the design.
+_PRIORITY_TAG_RE = re.compile(
+    r"<!--\s*PRIORITY\s*:\s*(action|fyi|silent_log)\s*-->", re.IGNORECASE
+)
+_SILENT_LOG_PATH = Path("~/.assistant/workspace/data/telegram-silent-log.jsonl").expanduser()
+_QUIET_HOURS_START = 21  # 21:00 local
+_QUIET_HOURS_END = 8     # 08:00 local
+
+
+def _extract_priority(text: str) -> tuple[str | None, str]:
+    """Find a <!--PRIORITY:LEVEL--> tag in `text`. Returns (level_or_None, text_with_tag_stripped)."""
+    m = _PRIORITY_TAG_RE.search(text)
+    if not m:
+        return None, text
+    level = m.group(1).lower()
+    cleaned = _PRIORITY_TAG_RE.sub("", text).strip()
+    return level, cleaned
+
+
+def _in_quiet_hours(now: datetime | None = None) -> bool:
+    """Return True if local time is within quiet hours [21:00, 08:00)."""
+    h = (now or datetime.now()).hour
+    return h >= _QUIET_HOURS_START or h < _QUIET_HOURS_END
+
 
 # Type alias avoiding circular import with discord_bot.py
 SendTextFn = "Callable[[str], Awaitable[None]]"
@@ -70,11 +97,57 @@ class AssistantBot:
         user = update.effective_user
         return user is not None and user.id == self.config.telegram.owner_id
 
-    async def _send_text(self, chat_id: int, text: str) -> None:
-        for chunk in split_message(text):
-            await self._send_chunk(chat_id, chunk)
+    async def _send_text(
+        self,
+        chat_id: int,
+        text: str,
+        priority: str = "silent_log",
+        source: str = "unknown",
+    ) -> None:
+        """Push to Telegram (priority=action|fyi) or write to the silent log
+        (priority=silent_log). Default is silent_log so unprompted callers
+        opt-in to push rather than opt-out. Conversational replies use
+        `_reply`, not this path; that flow is unaffected.
 
-    async def _send_chunk(self, chat_id: int, chunk: str) -> None:
+        Quiet hours: between 21:00 and 08:00 local, ACTION degrades to
+        a silent push — the ACTION prefix is preserved so Tॐ sees the
+        priority when he wakes, but the notification doesn't disturb sleep.
+        """
+        if priority not in ("action", "fyi", "silent_log"):
+            logger.warning("Unknown priority %r; defaulting to silent_log", priority)
+            priority = "silent_log"
+
+        if priority == "silent_log":
+            await self._append_silent_log(source=source, text=text)
+            return
+
+        prefix = {"action": "🔴 ACTION: ", "fyi": "🟡 FYI: "}[priority]
+        disable_notif = priority == "fyi" or (priority == "action" and _in_quiet_hours())
+
+        for chunk in split_message(prefix + text):
+            await self._send_chunk(chat_id, chunk, disable_notification=disable_notif)
+
+    async def _append_silent_log(self, source: str, text: str) -> None:
+        """Write an entry to the silent-log JSONL file without blocking the event loop."""
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "text": text,
+        }
+
+        def _write() -> None:
+            _SILENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with _SILENT_LOG_PATH.open("a") as f:
+                f.write(json.dumps(entry) + "\n")
+
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _write)
+        except Exception:
+            logger.exception("Failed to append to silent log at %s", _SILENT_LOG_PATH)
+
+    async def _send_chunk(
+        self, chat_id: int, chunk: str, disable_notification: bool = False
+    ) -> None:
         """Send one chunk with Telegram Markdown rendering. Falls back to
         plain text on any parse error so a stray '*' or '_' in the model's
         output never blocks delivery.
@@ -84,10 +157,15 @@ class AssistantBot:
                 chat_id=chat_id,
                 text=to_telegram_markdown(chunk),
                 parse_mode="Markdown",
+                disable_notification=disable_notification,
             )
         except Exception as e:
             logger.debug("Markdown send failed (%s); falling back to plain", e)
-            await self.app.bot.send_message(chat_id=chat_id, text=strip_markdown(chunk))
+            await self.app.bot.send_message(
+                chat_id=chat_id,
+                text=strip_markdown(chunk),
+                disable_notification=disable_notification,
+            )
 
     async def _reply(self, update: Update, text: str) -> None:
         """update.message.reply_text with Markdown + plain fallback."""
@@ -124,6 +202,13 @@ class AssistantBot:
         if clean_text.strip().upper() in ("HEARTBEAT_OK", "NO_REPLY"):
             return
 
+        # Telegram priority routing. The model output may carry a
+        # <!--PRIORITY:action|fyi|silent_log--> tag; otherwise the job's
+        # configured default is used, falling back to silent_log.
+        tag_priority, clean_text = _extract_priority(clean_text)
+        job_default = (delivery and delivery.priority) or "silent_log"
+        priority = tag_priority or job_default
+
         # Route based on delivery
         if delivery and delivery.transport == "discord" and delivery.channel_id:
             if self.discord_bot is None:
@@ -140,7 +225,10 @@ class AssistantBot:
         # Default: Telegram owner
         chat_id = self.config.telegram.owner_id
         header = f"**Scheduled: {job_name}**\n\n"
-        await self._send_text(chat_id, header + clean_text)
+        await self._send_text(
+            chat_id, header + clean_text,
+            priority=priority, source=f"cron:{job_name}",
+        )
         telegram_log.append(job_name, clean_text)
 
     async def _process_delegations_from_job(self, text: str) -> None:
@@ -151,12 +239,19 @@ class AssistantBot:
             try:
                 status = await self.tmux.dispatch(task, timeout=cmd.timeout, session=session)
                 msg = f"Delegated: {status}"
-                await self._send_text(self.config.telegram.owner_id, msg)
+                await self._send_text(
+                    self.config.telegram.owner_id, msg,
+                    priority="silent_log", source="delegation",
+                )
                 telegram_log.append("delegation", msg)
             except Exception as e:
                 logger.exception("Cron delegation failed")
                 msg = f"Delegation failed: {e}"
-                await self._send_text(self.config.telegram.owner_id, msg)
+                # Failures escalate — Tॐ needs to know if a dispatch broke.
+                await self._send_text(
+                    self.config.telegram.owner_id, msg,
+                    priority="action", source="delegation_failure",
+                )
                 telegram_log.append("delegation", msg)
 
     def _enrich_with_project(self, task: str, project: str) -> str:
