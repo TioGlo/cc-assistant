@@ -1,5 +1,7 @@
 import argparse
+import asyncio
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -81,6 +83,25 @@ def main() -> None:
     app = bot.build()
 
     async def post_init(application) -> None:
+        # SIGHUP = reload scheduler jobs/reminders, not death. Registered
+        # FIRST — before the slow startup awaits (whisper warmup etc.) — so
+        # the unprotected window is as small as possible. Without a handler,
+        # SIGHUP (e.g. `systemctl kill -s HUP`) kills the bridge, and systemd
+        # treats SIGHUP-death as a *clean* exit, so Restart=on-failure never
+        # fires (2026-06-04 outage, 6h down).
+        def _on_sighup() -> None:
+            logger.info(
+                "SIGHUP received — reloading scheduler jobs/reminders "
+                "(config.yaml/code changes still require a restart)"
+            )
+            try:
+                summary = scheduler.reload()
+                logger.info("SIGHUP reload complete: %s", summary)
+            except Exception:
+                logger.exception("SIGHUP reload failed; service continues running")
+
+        asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, _on_sighup)
+
         scheduler.start()
         if config.scheduler.jobs:
             scheduler.seed_config_jobs(config.scheduler.jobs)
