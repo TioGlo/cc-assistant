@@ -177,7 +177,9 @@ class Scheduler:
                             model: str = "",
                             command: str = "",
                             timeout_seconds: int = 60,
-                            silent_on_empty: bool = True) -> None:
+                            silent_on_empty: bool = True,
+                            resume: bool = False,
+                            enabled: bool = True) -> None:
         jobs = self._load_dynamic_jobs()
         jobs = [j for j in jobs if j["name"] != name]
         entry = {"name": name,
@@ -197,9 +199,14 @@ class Scheduler:
             entry["session"] = session
         if delivery is not None:
             entry["delivery"] = {"transport": delivery.transport,
-                                 "channel_id": delivery.channel_id}
+                                 "channel_id": delivery.channel_id,
+                                 "priority": delivery.priority}
         if model:
             entry["model"] = model
+        if resume:
+            entry["resume"] = True
+        if not enabled:
+            entry["enabled"] = False
         jobs.append(entry)
         self._save_dynamic_jobs(jobs)
         # Keep the reload snapshot in sync so the next watcher-triggered
@@ -272,7 +279,9 @@ class Scheduler:
                                          model=job.model,
                                          command=job.command,
                                          timeout_seconds=job.timeout_seconds,
-                                         silent_on_empty=job.silent_on_empty)
+                                         silent_on_empty=job.silent_on_empty,
+                                         resume=job.resume,
+                                         enabled=job.enabled)
                 seeded += 1
                 schedule = job.cron or f"interval={job.interval}"
                 logger.info("Seeded job from config: %s (%s)", job.name, schedule)
@@ -582,7 +591,8 @@ class Scheduler:
         # Stash delivery as a plain dict in kwargs so APScheduler can persist it
         # (apscheduler pickles kwargs; a dict is friendlier than a dataclass).
         delivery_dict = (
-            {"transport": delivery.transport, "channel_id": delivery.channel_id}
+            {"transport": delivery.transport, "channel_id": delivery.channel_id,
+             "priority": delivery.priority}
             if delivery else None
         )
         kwargs = {"job_name": name, "working_dir": working_dir,
@@ -622,6 +632,16 @@ class Scheduler:
         logger.info("Added %s job: %s (%s,%s)", kind_label, name, schedule_label, extra)
         return job_id
 
+    @staticmethod
+    def _failure_delivery(delivery: dict | None) -> JobDelivery:
+        """Delivery override for failure notifications: keep the configured
+        transport/channel but force priority to 'action'. A job configured
+        silent_log must not FAIL silently — before this, failures landed in
+        the silent log and the owner never saw them."""
+        d = dict(delivery or {})
+        d["priority"] = "action"
+        return JobDelivery(**d)
+
     async def _run_command_job(self, job_name: str, command: str,
                                working_dir: str | None = None,
                                delivery: dict | None = None,
@@ -647,12 +667,13 @@ class Scheduler:
                 proc.kill()
                 msg = f"⏱ `{job_name}` timed out after {timeout_seconds}s"
                 if self._callback:
-                    await self._callback(job_name, msg, delivery_obj)
+                    await self._callback(job_name, msg, self._failure_delivery(delivery))
                 return
         except Exception as e:
             logger.exception("Command job %s failed to spawn", job_name)
             if self._callback:
-                await self._callback(job_name, f"❌ `{job_name}` spawn failed: {e}", delivery_obj)
+                await self._callback(job_name, f"❌ `{job_name}` spawn failed: {e}",
+                                     self._failure_delivery(delivery))
             return
 
         out = stdout.decode(errors="replace").strip()
@@ -662,7 +683,10 @@ class Scheduler:
         if rc != 0:
             tail = (err or out or "(no output)")[-1500:]
             msg = f"❌ `{job_name}` exit {rc}\n```\n{tail}\n```"
-        elif not out:
+            if self._callback:
+                await self._callback(job_name, msg, self._failure_delivery(delivery))
+            return
+        if not out:
             if silent_on_empty:
                 logger.info("Command job %s produced no output; skipping delivery", job_name)
                 return
@@ -712,7 +736,7 @@ class Scheduler:
         if self._callback:
             await self._callback(
                 job_name, f"Job failed after {max_retries} attempts. Check logs.",
-                delivery_obj,
+                self._failure_delivery(delivery),
             )
 
     async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
