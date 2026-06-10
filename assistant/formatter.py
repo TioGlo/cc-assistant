@@ -7,10 +7,11 @@ TELEGRAM_MAX_LEN = 4096
 SCHEDULE_PATTERN = re.compile(r"<!--SCHEDULE:(.*?)-->", re.DOTALL)
 REMIND_PATTERN = re.compile(r"<!--REMIND:(.*?)-->", re.DOTALL)
 DELEGATE_PATTERN = re.compile(r"<!--DELEGATE:(.*?)-->", re.DOTALL)
-# Broad on purpose (\w+, not just the valid levels): malformed tags must not
-# leak to the user either. Routing extraction happens BEFORE strip_commands
+# Broad on purpose ([^>]*, not just the valid levels): malformed tags —
+# including hyphenated or multi-word levels — must not leak to the user
+# either. Routing extraction happens BEFORE strip_commands
 # (bot._extract_priority), so stripping here is safe.
-PRIORITY_PATTERN = re.compile(r"<!--\s*PRIORITY\s*:\s*\w+\s*-->", re.IGNORECASE)
+PRIORITY_PATTERN = re.compile(r"<!--\s*PRIORITY\s*:[^>]*-->", re.IGNORECASE)
 
 # Match fenced code blocks (```...```) and inline code (`...`) so we leave
 # their contents alone when transforming markdown for Telegram.

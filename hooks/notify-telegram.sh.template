@@ -10,8 +10,20 @@
 AGENT_ROOT="{{AGENT_ROOT}}"
 CONFIG="$AGENT_ROOT/config.yaml"
 
-BOT_TOKEN=$(sed -n 's/^[[:space:]]*bot_token:[[:space:]]*["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*$/\1/p' "$CONFIG" 2>/dev/null | head -1)
-OWNER_ID=$(sed -n 's/^[[:space:]]*owner_id:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$CONFIG" 2>/dev/null | head -1)
+# Extract a scalar config value: handles double/single-quoted and unquoted
+# forms, strips trailing comments and whitespace (an unquoted hand-edited
+# value like `bot_token: 123:ABC  # prod` must not capture the comment).
+_cfg_value() {
+  sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" "$CONFIG" 2>/dev/null | head -1 \
+    | sed -e 's/^"\([^"]*\)".*$/\1/' \
+          -e "s/^'\([^']*\)'.*\$/\1/" \
+          -e 's/[[:space:]]*#.*$//' \
+          -e 's/[[:space:]]*$//'
+}
+
+BOT_TOKEN=$(_cfg_value bot_token)
+OWNER_ID=$(_cfg_value owner_id)
+case "$OWNER_ID" in (*[!0-9]*|"") OWNER_ID="" ;; esac
 if [ -z "$BOT_TOKEN" ] || [ -z "$OWNER_ID" ] || [ "$BOT_TOKEN" = "YOUR_BOT_TOKEN" ]; then
   exit 0
 fi
@@ -24,18 +36,31 @@ INPUT=$(cat)
 TYPE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('notification_type',''))" 2>/dev/null)
 CWD=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null)
 
-# Scope to this agent's tree.
-case "$CWD" in
-  ${AGENT_ROOT}/*) ;;
+# Scope to this agent's tree. Canonicalize both sides — a symlinked agent
+# root or --agent-dir would otherwise never match and silently disable all
+# notifications.
+CWD_REAL=$(readlink -f "$CWD" 2>/dev/null || echo "$CWD")
+ROOT_REAL=$(readlink -f "$AGENT_ROOT" 2>/dev/null || echo "$AGENT_ROOT")
+case "$CWD_REAL" in
+  "$ROOT_REAL"|"$ROOT_REAL"/*) ;;
   *) exit 0 ;;
 esac
 
 # Find the tmux session whose pane runs in that directory — works for ANY
 # configured cc_agent (workspace, code, research...), not a hardcoded name.
-# No matching pane means this isn't a tmux-driven agent (the bot's own
-# claude -p invocations, or a plain interactive session) — stay quiet.
-TMUX_SESSION=$(tmux list-panes -a -F '#{session_name} #{pane_current_path}' 2>/dev/null \
-  | awk -v cwd="$CWD" '$2 == cwd {print $1; exit}')
+# Tab-separated + per-pane canonicalization so paths with spaces or symlinks
+# match. No matching pane means this isn't a tmux-driven agent (the bot's
+# own claude -p invocations, or a plain interactive session) — stay quiet.
+TMUX_SESSION=""
+while IFS="$(printf '\t')" read -r sess path; do
+  [ -n "$path" ] || continue
+  if [ "$(readlink -f "$path" 2>/dev/null || echo "$path")" = "$CWD_REAL" ]; then
+    TMUX_SESSION="$sess"
+    break
+  fi
+done <<EOF_PANES
+$(tmux list-panes -a -F "#{session_name}$(printf '\t')#{pane_current_path}" 2>/dev/null)
+EOF_PANES
 [ -z "$TMUX_SESSION" ] && exit 0
 AGENT="$TMUX_SESSION"
 

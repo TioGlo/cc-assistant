@@ -108,7 +108,8 @@ if [ ! -f "$AGENT_ROOT/config.yaml" ]; then
     chmod 600 "$AGENT_ROOT/config.yaml"   # holds the bot token
     echo "  Created $AGENT_ROOT/config.yaml — edit with your settings"
 else
-    echo "  Config already exists, skipping"
+    chmod 600 "$AGENT_ROOT/config.yaml"   # idempotent perm tightening — it holds the bot token
+    echo "  Config already exists, skipping (permissions tightened to 600)"
 fi
 
 # 3. Seed workspace templates (don't overwrite existing)
@@ -286,6 +287,17 @@ for template in "$SCRIPT_DIR"/hooks/*.template; do
             "$template" > "$target"
         chmod 700 "$target"
         echo "  Created $target"
+    else
+        # Never overwrite (may be user-customized), but tighten perms and
+        # flag drift — older notify-telegram.sh shipped with the bot token
+        # BAKED IN; the current template reads config.yaml at runtime.
+        chmod 700 "$target"
+        if grep -q 'BOT_TOKEN="[0-9]' "$target" 2>/dev/null; then
+            echo "  ⚠ $name exists with an embedded bot token — the new template reads"
+            echo "    config.yaml at runtime. Recommended: delete $target and re-run install."
+        else
+            echo "  $name already exists, skipping (permissions tightened to 700)"
+        fi
     fi
 done
 

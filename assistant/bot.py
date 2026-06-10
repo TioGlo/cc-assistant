@@ -23,6 +23,7 @@ from .bridge import AuthError, BridgeError, ClaudeBridge
 from .config import Config, JobDelivery
 from .fileio import atomic_write_text
 from .formatter import (
+    PRIORITY_PATTERN,
     extract_delegate_commands,
     extract_remind_commands,
     extract_schedule_commands,
@@ -219,6 +220,13 @@ class AssistantBot:
         # Extracted BEFORE strip_commands, which now removes PRIORITY tags
         # (they must never leak verbatim to the user).
         tag_priority, result_text = _extract_priority(result_text)
+        if tag_priority is None and PRIORITY_PATTERN.search(result_text):
+            # The model emitted a PRIORITY tag with an unrecognized level
+            # ("urgent", "high", ...). It clearly wanted visibility — degrade
+            # to a quiet message, never to the invisible silent log.
+            logger.warning("Job %s: unrecognized PRIORITY level in %r; treating as fyi",
+                           job_name, PRIORITY_PATTERN.search(result_text).group(0))
+            tag_priority = "fyi"
         self._process_commands(result_text)
         await self._process_delegations_from_job(result_text)
         clean_text = strip_commands(result_text)
@@ -306,7 +314,7 @@ class AssistantBot:
         if not watermark:
             watermark = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-        entries = self._read_silent_entries_since(watermark)
+        entries = await asyncio.to_thread(self._read_silent_entries_since, watermark)
         if not entries:
             logger.info("Silent digest: nothing silenced since %s; skipping", watermark)
             return
@@ -329,15 +337,29 @@ class AssistantBot:
                 self.DIGEST_PROMPT + "\n".join(lines),
                 model=self.config.notifications.digest_model or None,
             )
-            await self.on_job_result("morning catch-up", result_text,
-                                     JobDelivery(priority="fyi"))
+            # The digest is a curation pass, NOT an action surface: deliver
+            # directly instead of via on_job_result, so SCHEDULE/REMIND/
+            # DELEGATE blocks in curator output are stripped, never executed
+            # — which also makes a failed-delivery retry side-effect-free.
+            tag_priority, result_text = _extract_priority(result_text)
+            clean_text = strip_commands(result_text)
+            if clean_text and clean_text.strip().upper() not in ("HEARTBEAT_OK", "NO_REPLY"):
+                # Floor at fyi: the digest must never self-silence back into
+                # the log it summarizes. action escalation is allowed.
+                priority = "action" if tag_priority == "action" else "fyi"
+                await self._send_text(
+                    self.config.telegram.owner_id,
+                    f"**Morning catch-up**\n\n{clean_text}",
+                    priority=priority, source="silent-digest",
+                )
+                telegram_log.append("silent-digest", clean_text)
         except Exception:
             logger.exception(
                 "Silent digest failed; watermark not advanced — next digest re-covers this window")
             return
         try:
             atomic_write_text(self._digest_state_path(),
-                              json.dumps({"last_ts": entries[-1]["ts"]}))
+                              json.dumps({"last_ts": max(e["ts"] for e in entries)}))
         except OSError:
             logger.exception("Failed to persist digest watermark")
 
@@ -351,7 +373,7 @@ class AssistantBot:
                 n = max(1, min(50, int(context.args[0])))
             except ValueError:
                 pass
-        entries = self._read_silent_entries_since("")[-n:]
+        entries = (await asyncio.to_thread(self._read_silent_entries_since, ""))[-n:]
         if not entries:
             await update.message.reply_text("Silent log is empty.")
             return

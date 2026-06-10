@@ -121,11 +121,17 @@ def main() -> None:
         scheduler.load_jobs()
         scheduler.load_reminders()
         if config.notifications.digest_enabled:
-            scheduler.add_internal_cron(
-                bot.run_silent_digest, config.notifications.digest_cron,
-                job_id="_internal_silent_digest", name="silent-log morning digest",
-            )
-            logger.info("Silent-log digest scheduled (%s)", config.notifications.digest_cron)
+            # A digest_cron typo must not take the daemon down with it.
+            try:
+                scheduler.add_internal_cron(
+                    bot.run_silent_digest, config.notifications.digest_cron,
+                    job_id="_internal_silent_digest", name="silent-log morning digest",
+                )
+                logger.info("Silent-log digest scheduled (%s)", config.notifications.digest_cron)
+            except Exception:
+                logger.exception(
+                    "Invalid notifications.digest_cron %r; continuing without the digest",
+                    config.notifications.digest_cron)
         logger.info("Scheduler started")
         # Optional components must not take the daemon down with them: a
         # Slack/Discord API hiccup at boot would otherwise crash post_init

@@ -674,6 +674,10 @@ class Scheduler:
         return job_id
 
     def remove_job(self, name: str) -> bool:
+        if name.startswith("_internal"):
+            # The file watcher and digest are infrastructure, not user jobs;
+            # /cancel must not be able to silently kill them until restart.
+            return False
         removed = False
         for prefix in ("job_", "user_", "config_", "remind_"):
             try:
@@ -694,6 +698,8 @@ class Scheduler:
     def list_jobs(self) -> list[dict]:
         out = []
         for j in self._scheduler.get_jobs():
+            if j.id.startswith("_internal"):
+                continue  # infrastructure (file watcher, digest), not user jobs
             cmd = j.kwargs.get("command", "")
             prompt = j.kwargs.get("prompt", "")
             out.append({
