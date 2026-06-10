@@ -260,6 +260,22 @@ tmux new-session -s my-workspace -c ~/.myagent/workspace
 claude --dangerously-skip-permissions
 ```
 
+## Notifications
+
+Unprompted output — scheduled job results, reminders, completed delegations — is routed through a three-tier priority system rather than pushed straight to Telegram:
+
+| Priority | Behavior |
+|----------|----------|
+| `action` | Push notification (silent push during quiet hours, 21:00–08:00) |
+| `fyi` | Message without notification sound |
+| `silent_log` | Appended to the silent log — **the default for scheduled jobs** |
+
+Routing is decided by (in order): a `<!--PRIORITY:action\|fyi\|silent_log-->` tag the model embeds in its output (stripped before delivery), the job's `delivery: { priority: ... }` config, then the `silent_log` default. Reminders default to `action` and delegation completions to `fyi`; job **failures** always escalate to a push (rate-limited to one ping per job per 6h).
+
+Silenced output isn't lost: a **curated morning digest** (default 08:00, `notifications:` in config.yaml) has a cheap model review everything silenced since the last digest and deliver only what matters — or nothing at all on a quiet night (no LLM call is made if nothing accumulated). `/silenced` shows the raw entries on demand. A model reply of exactly `HEARTBEAT_OK` or `NO_REPLY` sends nothing anywhere.
+
+The shipped templates teach the agent this protocol, including the etiquette: notification trust is a budget.
+
 ## Core Commands
 
 | Command | Description |
@@ -269,7 +285,8 @@ claude --dangerously-skip-permissions
 | `/status` | Agent info, uptime, tmux session |
 | `/jobs` | List scheduled jobs |
 | `/schedule <cron> <prompt>` | Add a recurring job |
-| `/remind <delay> <prompt>` | One-shot reminder (e.g. `/remind 2h check deploy`) |
+| `/remind <delay> <prompt>` | One-shot reminder (e.g. `/remind 2h check deploy`) — fires as a push notification |
+| `/silenced [n]` | Show recent silent-log entries (raw) |
 | `/cancel <name>` | Remove a scheduled job |
 | `/reload` | Re-read `scheduler-jobs.json` and `scheduler-reminders.json` without restarting the service |
 | `/code <task>` | Dispatch to full Claude Code |
@@ -418,7 +435,7 @@ Anthropic doesn't publish quotas for Max-plan accounts and has changed its rolli
 
 - **Per-agent model selection** (`cc_agents.model`) — reserve Opus for live thinking and high-stakes work; route deterministic recurring agents (news scouts, structured engagement) to Sonnet or Haiku.
 - **Per-job model selection** (`scheduler.jobs[].model`) — most cron jobs do routing or short structured synthesis; both are firmly Sonnet/Haiku territory. Setting `model: "sonnet"` or `model: "haiku"` on a job passes `--model <model>` to its `claude -p` invocation. The scheduler **auto-isolates the resume session per model** (default `chat` becomes `chat-sonnet` / `chat-haiku`) so `--resume` doesn't try to rehydrate a conversation built under a different model. Explicit `session:` overrides the auto-isolation. Triage rule of thumb: prompts that just emit a DELEGATE block or invoke a subagent → Haiku; structured tool use + short synthesis → Sonnet; reserve Opus for jobs where the prompt itself needs creative judgment.
-- **Pure-bash scheduled jobs** (`scheduler.jobs[].command`) — for deterministic work that needs no judgment (ccusage reports, log rotation, disk checks, file cleanup, anything mechanical), set `command: "<bash>"` on the job *instead* of `prompt:`. The bot runs the command via `bash -c`, captures stdout/stderr, and delivers the output through the same Telegram/Discord pipeline. **Zero tokens.** `/jobs` distinguishes types with `🤖` (prompt) vs `⚙️` (command) icons. Optional `timeout_seconds` (default 60) and `silent_on_empty` (default true; suppress empty success outputs to avoid spam). Errors and timeouts are always reported. SCHEDULE blocks accept the same field, so the agent can create command-type jobs at runtime — under `bypassPermissions` this is no riskier than the agent's existing shell access, and it keeps everything visible in `/jobs` rather than scattered across system crontabs.
+- **Pure-bash scheduled jobs** (`scheduler.jobs[].command`) — for deterministic work that needs no judgment (ccusage reports, log rotation, disk checks, file cleanup, anything mechanical), set `command: "<bash>"` on the job *instead* of `prompt:`. The bot runs the command via `bash -c`, captures stdout/stderr, and routes the output through the same priority pipeline as prompt jobs (silent-logged by default — set `delivery: { priority: ... }` to push; failures always escalate). **Zero tokens.** `/jobs` distinguishes types with `🤖` (prompt) vs `⚙️` (command) icons. Optional `timeout_seconds` (default 60) and `silent_on_empty` (default true; suppress empty success outputs to avoid spam). Errors and timeouts are always reported. SCHEDULE blocks accept the same field, so the agent can create command-type jobs at runtime — under `bypassPermissions` this is no riskier than the agent's existing shell access, and it keeps everything visible in `/jobs` rather than scattered across system crontabs.
 - **Interval triggers for cache-friendly scheduling.** Claude Code's prompt cache TTL isn't documented but appears to be in the 5-min to 1-hour range. A heartbeat at `interval: "55m"` may land inside the cache window where a `cron: "0 */2 * * *"` always misses; the cache_read/cache_create ratio (visible via `npx ccusage@latest daily`) is the empirical signal. Note: per-job model isolation creates separate caches per session pool — individual ratios may dip even as total dollar cost falls because Sonnet/Haiku cache_create is much cheaper than Opus cache_create. **Watch the dollar line, not just the ratio.**
 - **Daily cost telemetry.** `npx ccusage@latest daily` exposes per-day token-class breakdown (input / output / cache_create / cache_read) and dollar cost. A pre-experiment baseline before changing scheduling cadence makes the impact measurable. The example config includes a `cache-ratio-check` cron that posts a one-line ratio summary to Telegram each night.
 

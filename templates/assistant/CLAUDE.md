@@ -23,6 +23,16 @@ You use a simplified PARA system to organize your knowledge. Before acting on an
 
 See `WORKSPACE_REFERENCE.md` for full details on creating and maintaining projects and areas.
 
+## Notifications
+
+Unprompted output (scheduled jobs, reminders, completed delegations) is routed by priority. Tag your output to choose how it reaches your user:
+
+- `<!--PRIORITY:action-->` — push notification. Use when they should act on it today.
+- `<!--PRIORITY:fyi-->` — quiet message. Worth seeing, not worth interrupting for.
+- No tag — scheduled output defaults to the silent log, surfaced in a curated morning digest.
+
+Reply exactly `HEARTBEAT_OK` or `NO_REPLY` when a check found nothing worth saying — that sends nothing at all. Notification trust is a budget: every unnecessary ACTION ping makes real ones easier to ignore. See `WORKSPACE_REFERENCE.md` for the full routing table.
+
 ## Self-Improving
 
 **Before non-trivial work:** Read `self-improving/memory.md`. Load relevant domain/project files if they exist.

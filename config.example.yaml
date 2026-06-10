@@ -25,6 +25,12 @@ claude:
 
     To delegate a complex task to a full interactive Claude session:
     <!--DELEGATE:{"task":"detailed description","timeout":600}-->
+
+    Unprompted output (scheduled jobs, reminders) is routed by priority.
+    Include <!--PRIORITY:action--> for a push notification (user should
+    act today) or <!--PRIORITY:fyi--> for a quiet message. Untagged
+    scheduled output goes to the silent log, surfaced by the morning
+    digest. Reply exactly NO_REPLY when there is nothing worth saying.
   # Files appended to system prompt (read fresh each invocation)
   system_prompt_files:
     - "{{AGENT_ROOT}}/workspace/self-improving/memory.md"
@@ -100,6 +106,14 @@ scheduler:
   # Each job needs `cron` OR `interval` (mutually exclusive).
   # Optional fields: working_dir, session, model, delivery.
   #
+  # `delivery` (notification routing):
+  #   delivery: { priority: "action" }   # push notification
+  #   delivery: { priority: "fyi" }      # quiet message, no sound
+  #   Default is "silent_log": output lands in the silent log and is
+  #   surfaced by the curated morning digest (see `notifications:` below).
+  #   The model can override per-output with a <!--PRIORITY:...--> tag.
+  #   Job FAILURES always escalate to a push regardless of this setting.
+  #
   # `model` (recommended for cheap recurring work):
   #   passed to claude -p as `--model <model>`. Empty / omitted = inherit
   #   claude.model above. Setting a per-job model auto-isolates the resume
@@ -141,6 +155,15 @@ scheduler:
   #   prompt: "Check AI news sources and summarize what's new."
   #   cron: "0 7 * * *"
   #   session: "research"      # optional: explicit session overrides the chat-<model> default
+
+# Notification catch-up for silenced output. Silent-logged items aren't
+# lost: a morning digest reviews everything silenced since the last digest
+# and delivers a ruthlessly curated summary — or nothing, if nothing
+# mattered (zero LLM calls on an empty night). /silenced shows raw entries.
+notifications:
+  digest_enabled: true
+  digest_cron: "0 8 * * *"     # quiet-hours end; fires on wake if the machine was suspended
+  digest_model: "haiku"        # curation is routing work — cheap model is plenty
 
 # Voice input (Phase 1 — transcription of Telegram voice messages).
 # Install: uv sync --extra voice    (pulls faster-whisper)

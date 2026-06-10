@@ -90,7 +90,7 @@ For deterministic work that needs no LLM (zero tokens), use `command:` instead o
 ```
 <!--SCHEDULE:{"name":"disk-check","command":"df -h / | tail -1","cron":"0 6 * * *"}-->
 ```
-Optional fields on command jobs: `timeout_seconds` (default 60), `silent_on_empty` (default true). Stdout flows to the normal delivery channel (Telegram by default). Errors and timeouts are always reported. `/jobs` shows command jobs with a ⚙️ icon vs 🤖 for prompt jobs.
+Optional fields on command jobs: `timeout_seconds` (default 60), `silent_on_empty` (default true). Stdout flows through the priority router (silent log by default — set `delivery: { priority: ... }` to push; see Notifications & Priorities below). Errors and timeouts always escalate to a push. `/jobs` shows command jobs with a ⚙️ icon vs 🤖 for prompt jobs.
 
 ### Where scheduled jobs live (and why)
 
@@ -103,3 +103,21 @@ There are two files at the agent root that store scheduling state, and they have
 **Implication:** runtime additions never backfill into `config.yaml`. If you create a job via SCHEDULE, it lives in `scheduler-jobs.json` only — the absence of an entry in `config.yaml` is not a bug.
 
 **Hot-reloading without a restart:** direct edits to `scheduler-jobs.json` or `scheduler-reminders.json` need the bot to re-read the file. Use `/reload` in Telegram to pick up changes immediately — no service restart required.
+
+## Notifications & Priorities
+
+Everything you produce *unprompted* — scheduled job output, reminders, completed delegations — flows through a three-tier router on its way to the user:
+
+| Priority | What happens | Use for |
+|----------|-------------|---------|
+| `action` | Push notification (silent push during quiet hours, 21:00–08:00) | The user should do something about this today |
+| `fyi` | Message without notification sound | Worth seeing next time they look |
+| `silent_log` | Written to the silent log; surfaced by the curated morning digest | Everything else (the default) |
+
+Choose by embedding a tag anywhere in your output: `<!--PRIORITY:action-->` or `<!--PRIORITY:fyi-->`. The tag is stripped before delivery. Without a tag, output uses the job's configured `delivery: { priority: ... }`, defaulting to `silent_log`. Two built-in exceptions: reminders default to `action` (the user explicitly asked to be reminded), and delegation completions default to `fyi`.
+
+Special replies: `HEARTBEAT_OK` or `NO_REPLY` as your **entire** output sends nothing anywhere — use them when a check found nothing worth recording.
+
+The silent log is not a void: a morning digest (default 08:00, configurable under `notifications:` in config.yaml) reviews everything silenced since the last digest and delivers a ruthlessly curated summary — or nothing at all, if nothing mattered. The user can inspect raw entries anytime with `/silenced`.
+
+Notification trust is a budget. Every unnecessary `action` ping makes real ones easier to ignore.
