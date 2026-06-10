@@ -1,8 +1,11 @@
 import asyncio
 import json
 import logging
+import time
+from datetime import datetime
 from pathlib import Path
 
+from . import paths
 from .config import ClaudeConfig
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,35 @@ class ClaudeBridge:
     def __init__(self, config: ClaudeConfig, workspace: Path) -> None:
         self.config = config
         self.workspace = workspace
+
+    def _log_usage(self, *, model: str, started: float, ok: bool,
+                   error: str = "", data: dict | None = None) -> None:
+        """Best-effort one-JSONL-line-per-invocation usage log. Claude
+        invocations are the dominant operating cost and previously had zero
+        instrumentation — this is the raw material for any /usage view."""
+        entry: dict = {
+            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "model": model,
+            "duration_s": round(time.monotonic() - started, 1),
+            "ok": ok,
+        }
+        if error:
+            entry["error"] = error[:200]
+        if data:
+            for key in ("total_cost_usd", "num_turns", "session_id"):
+                if data.get(key) is not None:
+                    entry[key] = data[key]
+            usage = data.get("usage") or {}
+            for key in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
+                if usage.get(key) is not None:
+                    entry[key] = usage[key]
+        try:
+            log_file = paths.usage_log_file()
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            with log_file.open("a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            logger.debug("Usage log append failed", exc_info=True)
 
     def _build_args(self, message: str, session_id: str | None = None,
                     model: str | None = None, effort: str | None = None) -> list[str]:
@@ -65,6 +97,8 @@ class ClaudeBridge:
         args = self._build_args(message, session_id, model=model, effort=effort)
         logger.debug("Spawning: %s (cwd=%s)", " ".join(args[:6]) + "...", cwd)
 
+        used_model = model or self.config.model
+        started = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -76,6 +110,9 @@ class ClaudeBridge:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
         except asyncio.TimeoutError:
             proc.kill()
+            await proc.wait()  # reap — kill() alone leaves a zombie
+            self._log_usage(model=used_model, started=started, ok=False,
+                            error=f"timeout after {self.config.timeout}s")
             raise BridgeError(f"Claude timed out after {self.config.timeout}s")
 
         stderr_text = ""
@@ -85,17 +122,22 @@ class ClaudeBridge:
                 logger.warning("Claude stderr: %s", stderr_text[:500])
 
         if any(m.lower() in stderr_text.lower() for m in AUTH_ERROR_MARKERS):
+            self._log_usage(model=used_model, started=started, ok=False, error="auth failure")
             raise AuthError("Claude authentication failed. Run `claude auth login` to re-authenticate.")
 
         stdout_text = stdout.decode(errors="replace").strip()
         if not stdout_text:
             if proc.returncode != 0:
+                self._log_usage(model=used_model, started=started, ok=False,
+                                error=f"exit {proc.returncode}: {stderr_text[:100]}")
                 raise BridgeError(f"Claude exited {proc.returncode}: {stderr_text[:200]}")
+            self._log_usage(model=used_model, started=started, ok=True)
             return "(no response)", session_id
 
         try:
             data = json.loads(stdout_text)
         except json.JSONDecodeError:
+            self._log_usage(model=used_model, started=started, ok=True)
             return stdout_text, session_id
 
         result_text = data.get("result", "(no response)")
@@ -104,4 +146,6 @@ class ClaudeBridge:
         if data.get("is_error"):
             logger.error("Claude returned error: %s", result_text)
 
+        self._log_usage(model=used_model, started=started,
+                        ok=not data.get("is_error", False), data=data)
         return result_text, new_session_id

@@ -57,6 +57,11 @@ def modules_dir() -> Path:
     return root() / "modules"
 
 
+def usage_log_file() -> Path:
+    """One JSONL line per claude -p invocation (model, duration, cost)."""
+    return workspace() / "data" / "claude-usage.jsonl"
+
+
 def agent_name() -> str:
     """Derive agent name from directory (e.g. '.assistant' -> 'assistant', '.luci' -> 'luci')."""
     return root().name.lstrip(".")
