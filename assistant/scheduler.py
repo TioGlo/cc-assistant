@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Awaitable
+from uuid import uuid4
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -46,15 +47,36 @@ _CRON_DOW_NAMES = {
 def _translate_dow(field: str) -> str:
     """Convert standard-cron DoW digits to day-name abbreviations.
 
-    Preserves *, ranges, lists, steps. Already-named tokens (mon, tue) pass
-    through unchanged. Examples:
+    Preserves *, ranges, and lists; already-named tokens (mon, tue) pass
+    through unchanged. Step expressions over digits ('*/2', '1-5/2') are
+    EXPANDED to explicit day-name lists using standard-cron semantics —
+    passing them through would let APScheduler apply the step over its own
+    day numbering (0=Mon vs cron's 0=Sun), silently shifting the days, and
+    naive digit substitution would corrupt the step ('*/2' -> '*/tue').
+    Examples:
         '6'         -> 'sat'
         '1,2,4,5'   -> 'mon,tue,thu,fri'
         '1-5'       -> 'mon-fri'
         '*'         -> '*'
+        '*/2'       -> 'sun,tue,thu,sat'
+        '1-5/2'     -> 'mon,wed,fri'
         'mon-fri'   -> 'mon-fri'
     """
-    return re.sub(r"\b[0-7]\b", lambda m: _CRON_DOW_NAMES[m.group(0)], field)
+    def _translate_part(part: str) -> str:
+        base, slash, step = part.partition("/")
+        if slash and step.isdigit():
+            if base == "*":
+                lo, hi = 0, 6
+            else:
+                m = re.fullmatch(r"([0-7])-([0-7])", base)
+                if not m:
+                    return part  # named range with step — APScheduler-native
+                lo, hi = int(m.group(1)), int(m.group(2))
+            return ",".join(_CRON_DOW_NAMES[str(d)]
+                            for d in range(lo, hi + 1, int(step)))
+        return re.sub(r"\b[0-7]\b", lambda m: _CRON_DOW_NAMES[m.group(0)], base) + slash + step
+
+    return ",".join(_translate_part(p) for p in field.split(","))
 
 JobCallback = Callable[[str, str, "JobDelivery | None"], Awaitable[None]]
 
@@ -75,7 +97,15 @@ class Scheduler:
         self._jobs_file = jobs_file
         self._reminders_file = jobs_file.parent / "scheduler-reminders.json"
         self._callback: JobCallback | None = None
-        self._scheduler = AsyncIOScheduler()
+        # APScheduler's default misfire_grace_time is 1 second: a brief
+        # event-loop stall — or a system suspend window straddling a fire
+        # time — silently skips the run, the exact failure class this daemon
+        # exists to prevent. 5 minutes tolerates stalls and wake-from-suspend;
+        # coalesce collapses a missed-run backlog into a single firing.
+        self._scheduler = AsyncIOScheduler(job_defaults={
+            "misfire_grace_time": 300,
+            "coalesce": True,
+        })
         # mtime fingerprints of the persistence files — kept in sync with disk
         # so the file-watcher can tell external edits (Kshana editing
         # scheduler-jobs.json by hand) apart from in-process saves.
@@ -531,7 +561,10 @@ class Scheduler:
                      session: str = "chat") -> str:
         delta = parse_delay(delay)
         run_at = datetime.now() + delta
-        job_id = f"remind_{int(run_at.timestamp())}"
+        # Timestamp prefix keeps the file human-scannable; the uuid suffix
+        # prevents same-second reminders from colliding (ConflictingIdError
+        # is a KeyError, which escaped the ValueError-only caller handlers).
+        job_id = f"remind_{int(run_at.timestamp())}_{uuid4().hex[:6]}"
         self._scheduler.add_job(
             self._run_reminder, trigger="date", run_date=run_at, id=job_id,
             name=f"reminder @ {run_at.strftime('%H:%M')}",
