@@ -2,6 +2,8 @@ import json
 import logging
 from pathlib import Path
 
+from .fileio import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,7 +24,7 @@ class SessionManager:
 
     def _save(self) -> None:
         try:
-            self.path.write_text(json.dumps(self._cache, indent=2))
+            atomic_write_text(self.path, json.dumps(self._cache, indent=2))
         except OSError as e:
             logger.error("Failed to save session file: %s", e)
 

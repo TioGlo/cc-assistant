@@ -13,6 +13,7 @@ from pathlib import Path
 from threading import Lock
 
 from . import paths
+from .fileio import atomic_write_text
 
 _MAX_ENTRIES = 20
 _MAX_TEXT_LEN = 500
@@ -36,10 +37,7 @@ def append(source: str, text: str) -> None:
         entries = read_all()
         entries.append(entry)
         entries = entries[-_MAX_ENTRIES:]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            for e in entries:
-                f.write(json.dumps(e) + "\n")
+        atomic_write_text(path, "".join(json.dumps(e) + "\n" for e in entries))
 
 
 def read_all() -> list[dict]:

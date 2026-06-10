@@ -354,7 +354,7 @@ class AssistantBot:
             logger.exception("Reload failed")
             await update.message.reply_text(f"Reload failed: {e}")
             return
-        await update.message.reply_text(
+        text = (
             f"Reloaded scheduler.\n"
             f"Jobs: +{summary['jobs_added']} added, "
             f"~{summary['jobs_replaced']} replaced, "
@@ -363,6 +363,13 @@ class AssistantBot:
             f"Reminders: {summary['reminders_loaded']} active, "
             f"{summary['reminders_expired']} expired."
         )
+        if summary.get("malformed"):
+            text += (
+                f"\n⚠️ {summary['malformed']} malformed entr"
+                f"{'y' if summary['malformed'] == 1 else 'ies'} skipped "
+                f"(left on disk — check logs)."
+            )
+        await update.message.reply_text(text)
 
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):

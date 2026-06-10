@@ -12,6 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from .bridge import ClaudeBridge
 from .config import JobDelivery, ScheduledJob
+from .fileio import atomic_write_text
 from .session import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -164,8 +165,7 @@ class Scheduler:
             ) from e
 
     def _save_dynamic_jobs(self, jobs: list[dict]) -> None:
-        self._jobs_file.parent.mkdir(parents=True, exist_ok=True)
-        self._jobs_file.write_text(json.dumps(jobs, indent=2))
+        atomic_write_text(self._jobs_file, json.dumps(jobs, indent=2))
         # Update fingerprint so the watcher doesn't treat our own write as an
         # external edit and trigger a redundant reload.
         self._jobs_file_mtime = self._mtime(self._jobs_file)
@@ -224,8 +224,7 @@ class Scheduler:
             ) from e
 
     def _save_reminders(self, reminders: list[dict]) -> None:
-        self._reminders_file.parent.mkdir(parents=True, exist_ok=True)
-        self._reminders_file.write_text(json.dumps(reminders, indent=2))
+        atomic_write_text(self._reminders_file, json.dumps(reminders, indent=2))
         self._reminders_file_mtime = self._mtime(self._reminders_file)
 
     def _append_reminder(self, reminder_id: str, prompt: str, run_at: datetime,
@@ -287,30 +286,39 @@ class Scheduler:
         no scheduling happens, so flipping the flag back is reversible.
         """
         for job in self._load_dynamic_jobs():
-            if not job.get("enabled", True):
-                logger.info("Skipping disabled job: %s", job.get("name"))
-                continue
-            job_id = f"job_{job['name']}"
-            if job_id not in {j.id for j in self._scheduler.get_jobs()}:
-                delivery_raw = job.get("delivery")
-                delivery = JobDelivery(**delivery_raw) if delivery_raw else None
-                self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
-                                       job.get("working_dir"), session=(job.get("session") or "chat"),
-                                       job_id_prefix="job_",
-                                       interval_expr=job.get("interval"),
-                                       delivery=delivery,
-                                       model=job.get("model", ""),
-                                       command=job.get("command", ""),
-                                       timeout_seconds=int(job.get("timeout_seconds", 60)),
-                                       silent_on_empty=bool(job.get("silent_on_empty", True)),
-                                       resume=bool(job.get("resume", False)))
-                self._loaded_job_defs[job["name"]] = job
-                schedule = job.get("cron") or f"interval={job.get('interval')}"
-                target = (delivery.transport if delivery else "telegram")
-                model_label = f" model={job['model']}" if job.get("model") else ""
-                logger.info("Loaded job: %s (%s, session=%s, target=%s%s)",
-                            job["name"], schedule, (job.get("session") or "chat"), target,
-                            model_label)
+            # One bad entry must not take the daemon down with it — the whole
+            # file failing to parse is still fatal (see _load_dynamic_jobs),
+            # but a single malformed entry is skipped and left on disk to fix.
+            try:
+                if not job.get("enabled", True):
+                    logger.info("Skipping disabled job: %s", job.get("name"))
+                    continue
+                job_id = f"job_{job['name']}"
+                if job_id not in {j.id for j in self._scheduler.get_jobs()}:
+                    delivery_raw = job.get("delivery")
+                    delivery = JobDelivery(**delivery_raw) if delivery_raw else None
+                    self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
+                                           job.get("working_dir"), session=(job.get("session") or "chat"),
+                                           job_id_prefix="job_",
+                                           interval_expr=job.get("interval"),
+                                           delivery=delivery,
+                                           model=job.get("model", ""),
+                                           command=job.get("command", ""),
+                                           timeout_seconds=int(job.get("timeout_seconds", 60)),
+                                           silent_on_empty=bool(job.get("silent_on_empty", True)),
+                                           resume=bool(job.get("resume", False)))
+                    self._loaded_job_defs[job["name"]] = job
+                    schedule = job.get("cron") or f"interval={job.get('interval')}"
+                    target = (delivery.transport if delivery else "telegram")
+                    model_label = f" model={job['model']}" if job.get("model") else ""
+                    logger.info("Loaded job: %s (%s, session=%s, target=%s%s)",
+                                job["name"], schedule, (job.get("session") or "chat"), target,
+                                model_label)
+            except Exception:
+                logger.exception(
+                    "Skipping malformed job entry in %s (left on disk; fix and /reload): %r",
+                    self._jobs_file, job,
+                )
 
     def reload(self) -> dict:
         """Re-read scheduler-jobs.json and scheduler-reminders.json and sync the
@@ -324,39 +332,50 @@ class Scheduler:
         replaced = 0
         unchanged = 0
         skipped = 0
+        malformed = 0
         for job in self._load_dynamic_jobs():
-            if not job.get("enabled", True):
-                # Disabled jobs are intentionally absent from target_jobs so
-                # they fall into removed_jobs below if previously running.
-                self._loaded_job_defs.pop(job.get("name", ""), None)
-                skipped += 1
-                continue
-            job_id = f"job_{job['name']}"
-            target_jobs.add(job_id)
-            existing = job_id in before_jobs
-            if existing and self._loaded_job_defs.get(job["name"]) == job:
-                # Definition unchanged — don't touch the live job, so an
-                # interval trigger keeps its phase (next_run_time) instead
-                # of being pushed out to now+interval by every reload.
-                unchanged += 1
-                continue
-            delivery_raw = job.get("delivery")
-            delivery = JobDelivery(**delivery_raw) if delivery_raw else None
-            self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
-                                   job.get("working_dir"), session=(job.get("session") or "chat"),
-                                   job_id_prefix="job_",
-                                   interval_expr=job.get("interval"),
-                                   delivery=delivery,
-                                   model=job.get("model", ""),
-                                   command=job.get("command", ""),
-                                   timeout_seconds=int(job.get("timeout_seconds", 60)),
-                                   silent_on_empty=bool(job.get("silent_on_empty", True)),
-                                   resume=bool(job.get("resume", False)))
-            self._loaded_job_defs[job["name"]] = job
-            if existing:
-                replaced += 1
-            else:
-                added += 1
+            try:
+                if not job.get("enabled", True):
+                    # Disabled jobs are intentionally absent from target_jobs so
+                    # they fall into removed_jobs below if previously running.
+                    self._loaded_job_defs.pop(job.get("name", ""), None)
+                    skipped += 1
+                    continue
+                job_id = f"job_{job['name']}"
+                target_jobs.add(job_id)
+                existing = job_id in before_jobs
+                if existing and self._loaded_job_defs.get(job["name"]) == job:
+                    # Definition unchanged — don't touch the live job, so an
+                    # interval trigger keeps its phase (next_run_time) instead
+                    # of being pushed out to now+interval by every reload.
+                    unchanged += 1
+                    continue
+                delivery_raw = job.get("delivery")
+                delivery = JobDelivery(**delivery_raw) if delivery_raw else None
+                self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
+                                       job.get("working_dir"), session=(job.get("session") or "chat"),
+                                       job_id_prefix="job_",
+                                       interval_expr=job.get("interval"),
+                                       delivery=delivery,
+                                       model=job.get("model", ""),
+                                       command=job.get("command", ""),
+                                       timeout_seconds=int(job.get("timeout_seconds", 60)),
+                                       silent_on_empty=bool(job.get("silent_on_empty", True)),
+                                       resume=bool(job.get("resume", False)))
+                self._loaded_job_defs[job["name"]] = job
+                if existing:
+                    replaced += 1
+                else:
+                    added += 1
+            except Exception:
+                malformed += 1
+                # If a previously-good job's definition went bad on disk, keep
+                # the live version running rather than removing it below.
+                if isinstance(job, dict) and job.get("name"):
+                    target_jobs.add(f"job_{job['name']}")
+                logger.exception(
+                    "Skipping malformed job entry during reload (left on disk): %r", job,
+                )
         removed_jobs = before_jobs - target_jobs
         for job_id in removed_jobs:
             self._loaded_job_defs.pop(job_id.removeprefix("job_"), None)
@@ -385,18 +404,25 @@ class Scheduler:
         reminder_dropped = 0
         surviving = []
         for r in on_disk:
-            run_at = datetime.fromisoformat(r["run_at"])
-            if run_at <= now:
-                reminder_dropped += 1
-                continue
-            self._scheduler.add_job(
-                self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
-                name=f"reminder @ {run_at.strftime('%H:%M')}", replace_existing=True,
-                kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
-                        "session": r.get("session", "chat")},
-            )
-            reminder_added += 1
-            surviving.append(r)
+            try:
+                run_at = datetime.fromisoformat(r["run_at"])
+                if run_at <= now:
+                    reminder_dropped += 1
+                    continue
+                self._scheduler.add_job(
+                    self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
+                    name=f"reminder @ {run_at.strftime('%H:%M')}", replace_existing=True,
+                    kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
+                            "session": r.get("session", "chat")},
+                )
+                reminder_added += 1
+                surviving.append(r)
+            except Exception:
+                malformed += 1
+                # Preserve the entry on disk — never silently delete data we
+                # couldn't parse.
+                surviving.append(r)
+                logger.exception("Skipping malformed reminder entry (left on disk): %r", r)
         if len(surviving) != len(on_disk):
             self._save_reminders(surviving)
 
@@ -406,6 +432,7 @@ class Scheduler:
             "jobs_unchanged": unchanged,
             "jobs_removed": len(removed_jobs),
             "jobs_skipped": skipped,
+            "malformed": malformed,
             "reminders_loaded": reminder_added,
             "reminders_expired": reminder_dropped,
         }
@@ -419,21 +446,25 @@ class Scheduler:
         surviving = []
         existing = {j.id for j in self._scheduler.get_jobs()}
         for r in reminders:
-            run_at = datetime.fromisoformat(r["run_at"])
-            if run_at <= now:
-                logger.info("Discarding expired reminder: %s", r["id"])
-                continue
-            if r["id"] in existing:
+            try:
+                run_at = datetime.fromisoformat(r["run_at"])
+                if run_at <= now:
+                    logger.info("Discarding expired reminder: %s", r["id"])
+                    continue
+                if r["id"] in existing:
+                    surviving.append(r)
+                    continue
+                self._scheduler.add_job(
+                    self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
+                    name=f"reminder @ {run_at.strftime('%H:%M')}",
+                    kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
+                            "session": r.get("session", "chat")},
+                )
                 surviving.append(r)
-                continue
-            self._scheduler.add_job(
-                self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
-                name=f"reminder @ {run_at.strftime('%H:%M')}",
-                kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
-                        "session": r.get("session", "chat")},
-            )
-            surviving.append(r)
-            logger.info("Restored reminder: %s (fires at %s)", r["id"], run_at.strftime('%H:%M'))
+                logger.info("Restored reminder: %s (fires at %s)", r["id"], run_at.strftime('%H:%M'))
+            except Exception:
+                surviving.append(r)
+                logger.exception("Skipping malformed reminder entry (left on disk): %r", r)
         # Clean up expired entries
         if len(surviving) != len(reminders):
             self._save_reminders(surviving)
