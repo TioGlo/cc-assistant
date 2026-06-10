@@ -47,34 +47,50 @@ _CRON_DOW_NAMES = {
 def _translate_dow(field: str) -> str:
     """Convert standard-cron DoW digits to day-name abbreviations.
 
-    Preserves *, ranges, and lists; already-named tokens (mon, tue) pass
-    through unchanged. Step expressions over digits ('*/2', '1-5/2') are
-    EXPANDED to explicit day-name lists using standard-cron semantics —
-    passing them through would let APScheduler apply the step over its own
-    day numbering (0=Mon vs cron's 0=Sun), silently shifting the days, and
-    naive digit substitution would corrupt the step ('*/2' -> '*/tue').
-    Examples:
+    Digit ranges and step expressions are EXPANDED to explicit day-name
+    lists using standard-cron semantics (0=Sun). Passing digits through
+    would let APScheduler interpret them in its own numbering (0=Mon),
+    silently shifting the days; digit ranges anchored at 0 ('0-3') would
+    even become reversed name ranges ('sun-wed') that APScheduler rejects,
+    and '0-7' would become 'sun-sun' (Sundays only). Already-named tokens
+    (mon, tue, mon-fri/2) pass through unchanged. Examples:
         '6'         -> 'sat'
         '1,2,4,5'   -> 'mon,tue,thu,fri'
-        '1-5'       -> 'mon-fri'
+        '1-5'       -> 'mon,tue,wed,thu,fri'
+        '0-3'       -> 'sun,mon,tue,wed'
         '*'         -> '*'
         '*/2'       -> 'sun,tue,thu,sat'
         '1-5/2'     -> 'mon,wed,fri'
+        '1/2'       -> 'mon,wed,fri,sun'   (Vixie shorthand for 1-7/2)
         'mon-fri'   -> 'mon-fri'
     """
+    def _expand(lo: int, hi: int, step: int) -> str:
+        if lo > hi:
+            raise ValueError(
+                f"Invalid day-of-week range in {field!r}: {lo}-{hi} (start > end)"
+            )
+        names: list[str] = []
+        for d in range(lo, hi + 1, step):
+            name = _CRON_DOW_NAMES[str(d)]
+            if name not in names:  # 0 and 7 both mean Sunday
+                names.append(name)
+        return ",".join(names)
+
     def _translate_part(part: str) -> str:
-        base, slash, step = part.partition("/")
-        if slash and step.isdigit():
-            if base == "*":
-                lo, hi = 0, 6
-            else:
-                m = re.fullmatch(r"([0-7])-([0-7])", base)
-                if not m:
-                    return part  # named range with step — APScheduler-native
-                lo, hi = int(m.group(1)), int(m.group(2))
-            return ",".join(_CRON_DOW_NAMES[str(d)]
-                            for d in range(lo, hi + 1, int(step)))
-        return re.sub(r"\b[0-7]\b", lambda m: _CRON_DOW_NAMES[m.group(0)], base) + slash + step
+        base, slash, step_str = part.partition("/")
+        step = int(step_str) if slash and step_str.isdigit() else None
+        if slash and step is None:
+            return part  # malformed step — let CronTrigger reject it loudly
+        m = re.fullmatch(r"([0-7])-([0-7])", base)
+        if m:
+            return _expand(int(m.group(1)), int(m.group(2)), step or 1)
+        if base == "*" and step:
+            return _expand(0, 6, step)
+        if re.fullmatch(r"[0-7]", base) and step:
+            return _expand(int(base), 7, step)  # Vixie: 'd/step' == 'd-7/step'
+        if step:
+            return part  # named range with step — APScheduler-native
+        return re.sub(r"\b[0-7]\b", lambda mm: _CRON_DOW_NAMES[mm.group(0)], base)
 
     return ",".join(_translate_part(p) for p in field.split(","))
 
@@ -121,6 +137,16 @@ class Scheduler:
         # Last time each job's failure was escalated to an action push —
         # used to rate-limit repeat pings from a chronically failing job.
         self._failure_escalated: dict[str, datetime] = {}
+        # Reminder IDs whose _run_reminder is currently executing. APScheduler
+        # drops a date job from its store at submission, so during the
+        # (minutes-long) LLM run the reminder exists only on disk with
+        # run_at <= now — without this set, any reload in that window would
+        # re-schedule it as "missed".
+        self._inflight_reminders: set[str] = set()
+        # Undelivered-reminder retry counts (in-memory; resets on restart).
+        # Backs off the overdue sweep's re-delivery and bounds total attempts
+        # so a permanently failing delivery can't burn an LLM run every cycle.
+        self._reminder_retries: dict[str, int] = {}
 
     def set_callback(self, callback: JobCallback) -> None:
         self._callback = callback
@@ -150,6 +176,7 @@ class Scheduler:
 
     async def _watch_files(self) -> None:
         """Reload if scheduler-jobs.json or scheduler-reminders.json changed on disk."""
+        self._rescue_overdue_reminders()
         jobs_mt = self._mtime(self._jobs_file)
         rem_mt = self._mtime(self._reminders_file)
         if jobs_mt == self._jobs_file_mtime and rem_mt == self._reminders_file_mtime:
@@ -165,6 +192,47 @@ class Scheduler:
         # don't tight-loop reloading a corrupt file every 15 seconds.
         self._jobs_file_mtime = self._mtime(self._jobs_file)
         self._reminders_file_mtime = self._mtime(self._reminders_file)
+
+    def _rescue_overdue_reminders(self) -> None:
+        """Deliver reminders that fell through every other path. A reminder
+        whose fire time lapses past the misfire grace (e.g. a system suspend
+        straddling it by >5min) is dropped by APScheduler while its
+        persistence entry survives — without this sweep it would sit on disk
+        until an unrelated reload or restart. Runs on every 15s watcher tick,
+        independent of file-mtime changes."""
+        try:
+            reminders = self._load_reminders()
+        except RuntimeError:
+            return  # corrupt file — the reload path reports this loudly
+        if not reminders:
+            return
+        now = datetime.now()
+        live = {j.id for j in self._scheduler.get_jobs()}
+        late = 0
+        for r in reminders:
+            try:
+                if r["id"] in live or r["id"] in self._inflight_reminders:
+                    continue
+                run_at = self._parse_run_at(r)
+                if run_at <= now:
+                    # Back off re-delivery for reminders that already failed:
+                    # 10 extra minutes per prior attempt.
+                    backoff = 600 * self._reminder_retries.get(r["id"], 0)
+                    self._schedule_late_reminder(r, run_at,
+                                                 delay_seconds=5 + 30 * late + backoff)
+                    late += 1
+            except Exception:
+                continue  # malformed entries are reported by the load/reload paths
+
+    @staticmethod
+    def _parse_run_at(r: dict) -> datetime:
+        """Parse a reminder's run_at; normalize timezone-aware timestamps
+        (external editors may write '+00:00' suffixes) to naive local time
+        so comparisons against datetime.now() don't raise."""
+        run_at = datetime.fromisoformat(r["run_at"])
+        if run_at.tzinfo is not None:
+            run_at = run_at.astimezone().replace(tzinfo=None)
+        return run_at
 
     def stop(self) -> None:
         if self._scheduler.running:
@@ -456,16 +524,18 @@ class Scheduler:
 
         reminder_added = 0
         reminder_late = 0
-        surviving = []
         for r in on_disk:
             try:
-                run_at = datetime.fromisoformat(r["run_at"])
+                if r["id"] in self._inflight_reminders:
+                    # Currently executing — absent from the scheduler but
+                    # still on disk. Not missed; leave it alone.
+                    continue
+                run_at = self._parse_run_at(r)
                 if run_at <= now:
                     # Came due while we weren't looking (downtime before the
                     # reload, or a lapsed misfire window) — deliver late.
-                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 5 * reminder_late)
+                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 30 * reminder_late)
                     reminder_late += 1
-                    surviving.append(r)
                     continue
                 self._scheduler.add_job(
                     self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
@@ -474,15 +544,11 @@ class Scheduler:
                             "session": r.get("session", "chat")},
                 )
                 reminder_added += 1
-                surviving.append(r)
             except Exception:
                 malformed += 1
-                # Preserve the entry on disk — never silently delete data we
+                # Entry stays on disk — never silently delete data we
                 # couldn't parse.
-                surviving.append(r)
                 logger.exception("Skipping malformed reminder entry (left on disk): %r", r)
-        if len(surviving) != len(on_disk):
-            self._save_reminders(surviving)
 
         summary = {
             "jobs_added": added,
@@ -509,8 +575,8 @@ class Scheduler:
             id=r["id"], name=f"missed reminder (was due {due_label})",
             replace_existing=True,
             kwargs={"reminder_id": r["id"],
-                    "prompt": (f"[Missed reminder — was due {due_label}, the service "
-                               f"wasn't running at fire time; delivering late] {r['prompt']}"),
+                    "prompt": (f"[Missed reminder — was due {due_label} but couldn't be "
+                               f"delivered at fire time; delivering late] {r['prompt']}"),
                     "session": r.get("session", "chat")},
         )
         logger.info("Reminder %s was due %s; delivering late", r["id"], due_label)
@@ -519,20 +585,16 @@ class Scheduler:
         """Reload persisted reminders that haven't fired yet; reminders that
         came due during downtime are delivered late (staggered)."""
         now = datetime.now()
-        reminders = self._load_reminders()
-        surviving = []
         late = 0
         existing = {j.id for j in self._scheduler.get_jobs()}
-        for r in reminders:
+        for r in self._load_reminders():
             try:
-                run_at = datetime.fromisoformat(r["run_at"])
-                if r["id"] in existing:
-                    surviving.append(r)
+                if r["id"] in existing or r["id"] in self._inflight_reminders:
                     continue
+                run_at = self._parse_run_at(r)
                 if run_at <= now:
-                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 5 * late)
+                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 30 * late)
                     late += 1
-                    surviving.append(r)
                     continue
                 self._scheduler.add_job(
                     self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
@@ -540,13 +602,9 @@ class Scheduler:
                     kwargs={"reminder_id": r["id"], "prompt": r["prompt"],
                             "session": r.get("session", "chat")},
                 )
-                surviving.append(r)
                 logger.info("Restored reminder: %s (fires at %s)", r["id"], run_at.strftime('%H:%M'))
             except Exception:
-                surviving.append(r)
                 logger.exception("Skipping malformed reminder entry (left on disk): %r", r)
-        if len(surviving) != len(reminders):
-            self._save_reminders(surviving)
 
     # -- Public API --
 
@@ -705,6 +763,25 @@ class Scheduler:
         logger.info("Added %s job: %s (%s,%s)", kind_label, name, schedule_label, extra)
         return job_id
 
+    async def _deliver(self, job_name: str, text: str,
+                       delivery_obj: JobDelivery | None) -> bool:
+        """Invoke the delivery callback, converting exceptions into a False
+        return with the result preserved in the journal. By this point all
+        side effects (SCHEDULE/DELEGATE processing inside the callback) have
+        run, so re-invoking the callback is never safe — callers decide what
+        a failed delivery means for them (reminders stay on disk and retry)."""
+        if not self._callback:
+            return True
+        try:
+            await self._callback(job_name, text, delivery_obj)
+            return True
+        except Exception:
+            logger.exception(
+                "Job %s: delivery failed; result preserved here:\n%s",
+                job_name, text[:2000],
+            )
+            return False
+
     # A chronically failing job escalates once, then goes quiet (silent log
     # only) until the cooldown lapses or a success resets it — one broken
     # 15-minute cron must not become a ping every 15 minutes.
@@ -753,15 +830,13 @@ class Scheduler:
                     pass
                 await proc.wait()  # reap — kill() alone leaves a zombie
                 msg = f"⏱ `{job_name}` timed out after {timeout_seconds}s"
-                if self._callback:
-                    await self._callback(job_name, msg,
-                                         self._failure_delivery(job_name, delivery))
+                await self._deliver(job_name, msg,
+                                    self._failure_delivery(job_name, delivery))
                 return
         except Exception as e:
             logger.exception("Command job %s failed to spawn", job_name)
-            if self._callback:
-                await self._callback(job_name, f"❌ `{job_name}` spawn failed: {e}",
-                                     self._failure_delivery(job_name, delivery))
+            await self._deliver(job_name, f"❌ `{job_name}` spawn failed: {e}",
+                                self._failure_delivery(job_name, delivery))
             return
 
         out = stdout.decode(errors="replace").strip()
@@ -771,9 +846,8 @@ class Scheduler:
         if rc != 0:
             tail = (err or out or "(no output)")[-1500:]
             msg = f"❌ `{job_name}` exit {rc}\n```\n{tail}\n```"
-            if self._callback:
-                await self._callback(job_name, msg,
-                                     self._failure_delivery(job_name, delivery))
+            await self._deliver(job_name, msg,
+                                self._failure_delivery(job_name, delivery))
             return
         self._failure_escalated.pop(job_name, None)
         if not out:
@@ -786,12 +860,14 @@ class Scheduler:
         else:
             msg = out
 
-        if self._callback:
-            await self._callback(job_name, msg, delivery_obj)
+        await self._deliver(job_name, msg, delivery_obj)
 
     async def _run_job(self, job_name: str, prompt: str, working_dir: str | None = None,
                        session: str = "chat", delivery: dict | None = None,
-                       model: str = "", resume: bool = False) -> None:
+                       model: str = "", resume: bool = False) -> bool:
+        """Returns True when the outcome (result or failure notice) reached
+        the delivery callback, False when delivery itself failed — callers
+        like _run_reminder use this to decide whether to retry later."""
         logger.info("Executing scheduled job: %s (session=%s, model=%s, resume=%s)",
                     job_name, session, model or "default", resume)
         delivery_obj = JobDelivery(**delivery) if delivery else None
@@ -823,12 +899,14 @@ class Scheduler:
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt * 5)
         else:
-            if self._callback:
-                await self._callback(
-                    job_name, f"Job failed after {max_retries} attempts. Check logs.",
-                    self._failure_delivery(job_name, delivery),
-                )
-            return
+            # Include the prompt head so the content isn't lost with the
+            # run — for a reminder this is the only copy the owner gets.
+            return await self._deliver(
+                job_name,
+                f"Job failed after {max_retries} attempts. Check logs.\n"
+                f"Prompt: {prompt[:300]}",
+                self._failure_delivery(job_name, delivery),
+            )
 
         # Only persist the new session ID when this job is opted into
         # resume — stateless jobs spawn a fresh session each fire and
@@ -836,23 +914,51 @@ class Scheduler:
         if resume and new_session_id:
             self.session_manager.set_session_id(new_session_id, session)
         self._failure_escalated.pop(job_name, None)
-        if self._callback:
-            try:
-                await self._callback(job_name, result_text, delivery_obj)
-            except Exception:
-                # Deliberately no callback retry: on_job_result runs side
-                # effects (SCHEDULE/DELEGATE processing) before sending, so
-                # re-invoking it would duplicate delegations. Transient sends
-                # are retried inside the bot's send path; if delivery still
-                # failed, preserve the result here for recovery.
-                logger.exception(
-                    "Job %s: delivery failed; result preserved here:\n%s",
-                    job_name, result_text[:2000],
-                )
+        return await self._deliver(job_name, result_text, delivery_obj)
 
     async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
                             session: str = "chat") -> None:
+        # Persistence is the source of truth: a late-delivery duplicate can
+        # fire after the original run completed (a reload raced an in-flight
+        # run); if the entry is gone, the reminder was already delivered.
+        if not any(isinstance(r, dict) and r.get("id") == reminder_id
+                   for r in self._load_reminders()):
+            logger.info("Reminder %s no longer in persistence; skipping duplicate fire",
+                        reminder_id)
+            return
         logger.info("Executing reminder: %s (session=%s)", reminder_id, session)
-        await self._run_job(job_name="reminder", prompt=prompt, working_dir=working_dir, session=session)
-        self._remove_reminder(reminder_id)
-        logger.info("Reminder %s fired and removed from persistence", reminder_id)
+        self._inflight_reminders.add(reminder_id)
+        try:
+            # Reminders are explicitly user-requested, so they default to an
+            # action push rather than the silent log (a model-emitted
+            # PRIORITY tag can still downgrade).
+            delivered = await self._run_job(
+                job_name="reminder", prompt=prompt,
+                working_dir=working_dir, session=session,
+                delivery={"transport": "telegram", "channel_id": None,
+                          "priority": "action"})
+            if delivered:
+                self._reminder_retries.pop(reminder_id, None)
+                self._remove_reminder(reminder_id)
+                logger.info("Reminder %s fired and removed from persistence", reminder_id)
+                return
+            # Delivery failed (e.g. Telegram unreachable): keep the entry so
+            # the overdue sweep retries with backoff — but bound the attempts
+            # so a permanently broken delivery can't loop LLM runs forever.
+            attempts = self._reminder_retries.get(reminder_id, 0) + 1
+            self._reminder_retries[reminder_id] = attempts
+            if attempts >= 5:
+                logger.error(
+                    "Reminder %s undelivered after %d attempts; giving up "
+                    "(content preserved in journal): %s",
+                    reminder_id, attempts, prompt[:200],
+                )
+                self._reminder_retries.pop(reminder_id, None)
+                self._remove_reminder(reminder_id)
+            else:
+                logger.warning(
+                    "Reminder %s undelivered (attempt %d/5); kept on disk for "
+                    "the overdue sweep to retry", reminder_id, attempts,
+                )
+        finally:
+            self._inflight_reminders.discard(reminder_id)

@@ -67,16 +67,26 @@ def main() -> None:
     discord_bot = DiscordBot(config.discord, assistant_bot=bot)
     bot.set_discord_bot(discord_bot)
 
-    # Tmux dispatch results go to Telegram
+    # Tmux dispatch results go to Telegram. The signal file is already
+    # consumed by the time this fires, so a delivery failure must not
+    # propagate into the watcher — preserve the result in the journal.
     async def on_code_result(task_id: str, result_text: str) -> None:
-        await bot.on_job_result(f"Code: {task_id}", result_text)
+        try:
+            await bot.on_job_result(f"Code: {task_id}", result_text)
+        except Exception:
+            logger.exception("Delivery of task %s result failed; preserving here:\n%s",
+                             task_id, result_text[:2000])
     bot.tmux.set_callback(on_code_result)
 
     # Slack triage
     async def on_slack_triage(prompt: str) -> None:
         result_text, _ = await bridge.send_simple(prompt)
         if "nothing notable" not in result_text.lower():
-            await bot.on_job_result("Slack digest", result_text)
+            try:
+                await bot.on_job_result("Slack digest", result_text)
+            except Exception:
+                logger.exception("Delivery of Slack digest failed; preserving here:\n%s",
+                                 result_text[:2000])
     slack_monitor.set_triage_callback(on_slack_triage)
 
     # Build Telegram app
