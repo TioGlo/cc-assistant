@@ -80,6 +80,13 @@ class Scheduler:
         # scheduler-jobs.json by hand) apart from in-process saves.
         self._jobs_file_mtime: float = 0.0
         self._reminders_file_mtime: float = 0.0
+        # Raw on-disk definition of each loaded job, by name. reload() uses
+        # this to leave unchanged jobs alone: re-adding an interval job with
+        # replace_existing=True resets its phase to now+interval, and the
+        # 15s file watcher reloads on ANY external edit — so without this
+        # check, frequent edits to scheduler-jobs.json starve every
+        # interval job (e.g. the 55m heartbeat) indefinitely.
+        self._loaded_job_defs: dict[str, dict] = {}
 
     def set_callback(self, callback: JobCallback) -> None:
         self._callback = callback
@@ -195,6 +202,9 @@ class Scheduler:
             entry["model"] = model
         jobs.append(entry)
         self._save_dynamic_jobs(jobs)
+        # Keep the reload snapshot in sync so the next watcher-triggered
+        # reload sees this entry as unchanged rather than re-adding it.
+        self._loaded_job_defs[name] = entry
 
     def _load_reminders(self) -> list[dict]:
         if not self._reminders_file.exists():
@@ -237,6 +247,7 @@ class Scheduler:
     def _remove_dynamic_job(self, name: str) -> bool:
         jobs = self._load_dynamic_jobs()
         filtered = [j for j in jobs if j["name"] != name]
+        self._loaded_job_defs.pop(name, None)
         if len(filtered) < len(jobs):
             self._save_dynamic_jobs(filtered)
             return True
@@ -293,6 +304,7 @@ class Scheduler:
                                        timeout_seconds=int(job.get("timeout_seconds", 60)),
                                        silent_on_empty=bool(job.get("silent_on_empty", True)),
                                        resume=bool(job.get("resume", False)))
+                self._loaded_job_defs[job["name"]] = job
                 schedule = job.get("cron") or f"interval={job.get('interval')}"
                 target = (delivery.transport if delivery else "telegram")
                 model_label = f" model={job['model']}" if job.get("model") else ""
@@ -310,18 +322,26 @@ class Scheduler:
         target_jobs = set()
         added = 0
         replaced = 0
+        unchanged = 0
         skipped = 0
         for job in self._load_dynamic_jobs():
             if not job.get("enabled", True):
                 # Disabled jobs are intentionally absent from target_jobs so
                 # they fall into removed_jobs below if previously running.
+                self._loaded_job_defs.pop(job.get("name", ""), None)
                 skipped += 1
                 continue
             job_id = f"job_{job['name']}"
             target_jobs.add(job_id)
+            existing = job_id in before_jobs
+            if existing and self._loaded_job_defs.get(job["name"]) == job:
+                # Definition unchanged — don't touch the live job, so an
+                # interval trigger keeps its phase (next_run_time) instead
+                # of being pushed out to now+interval by every reload.
+                unchanged += 1
+                continue
             delivery_raw = job.get("delivery")
             delivery = JobDelivery(**delivery_raw) if delivery_raw else None
-            existing = job_id in before_jobs
             self._add_to_scheduler(job["name"], job.get("prompt", ""), job.get("cron"),
                                    job.get("working_dir"), session=(job.get("session") or "chat"),
                                    job_id_prefix="job_",
@@ -332,12 +352,14 @@ class Scheduler:
                                    timeout_seconds=int(job.get("timeout_seconds", 60)),
                                    silent_on_empty=bool(job.get("silent_on_empty", True)),
                                    resume=bool(job.get("resume", False)))
+            self._loaded_job_defs[job["name"]] = job
             if existing:
                 replaced += 1
             else:
                 added += 1
         removed_jobs = before_jobs - target_jobs
         for job_id in removed_jobs:
+            self._loaded_job_defs.pop(job_id.removeprefix("job_"), None)
             try:
                 self._scheduler.remove_job(job_id)
             except Exception:
@@ -381,6 +403,7 @@ class Scheduler:
         summary = {
             "jobs_added": added,
             "jobs_replaced": replaced,
+            "jobs_unchanged": unchanged,
             "jobs_removed": len(removed_jobs),
             "jobs_skipped": skipped,
             "reminders_loaded": reminder_added,

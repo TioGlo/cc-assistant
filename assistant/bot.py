@@ -358,6 +358,7 @@ class AssistantBot:
             f"Reloaded scheduler.\n"
             f"Jobs: +{summary['jobs_added']} added, "
             f"~{summary['jobs_replaced']} replaced, "
+            f"={summary['jobs_unchanged']} unchanged, "
             f"−{summary['jobs_removed']} removed.\n"
             f"Reminders: {summary['reminders_loaded']} active, "
             f"{summary['reminders_expired']} expired."
