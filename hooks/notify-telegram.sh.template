@@ -1,12 +1,20 @@
 #!/bin/bash
 # Notification hook: Send permission prompts and idle notifications to Telegram.
 # Reads hook event data from stdin.
+#
+# Credentials are read from config.yaml at RUNTIME — nothing secret is baked
+# into this script. The first bot_token/owner_id in the file belong to the
+# telegram: block (discord/slack tokens appear later in config.example.yaml's
+# layout, so `head -1` picks the right one).
 
-# These get filled by install.sh — or set them manually
-BOT_TOKEN="YOUR_BOT_TOKEN"
-OWNER_ID="YOUR_OWNER_ID"
 AGENT_ROOT="{{AGENT_ROOT}}"
-AGENT_NAME="{{AGENT_NAME}}"
+CONFIG="$AGENT_ROOT/config.yaml"
+
+BOT_TOKEN=$(sed -n 's/^[[:space:]]*bot_token:[[:space:]]*["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*$/\1/p' "$CONFIG" 2>/dev/null | head -1)
+OWNER_ID=$(sed -n 's/^[[:space:]]*owner_id:[[:space:]]*\([0-9][0-9]*\).*$/\1/p' "$CONFIG" 2>/dev/null | head -1)
+if [ -z "$BOT_TOKEN" ] || [ -z "$OWNER_ID" ] || [ "$BOT_TOKEN" = "YOUR_BOT_TOKEN" ]; then
+  exit 0
+fi
 
 PENDING_DIR="$AGENT_ROOT/pending-approvals"
 mkdir -p "$PENDING_DIR"
@@ -15,51 +23,48 @@ INPUT=$(cat)
 
 TYPE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('notification_type',''))" 2>/dev/null)
 CWD=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('cwd',''))" 2>/dev/null)
-SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('session_id',''))" 2>/dev/null)
 
-# Identify agent by working directory
+# Scope to this agent's tree.
 case "$CWD" in
-  *${AGENT_ROOT}/coding*)    AGENT="${AGENT_NAME}-code" ;;
-  *${AGENT_ROOT}/workspace*) AGENT="${AGENT_NAME}" ;;
-  *)                         AGENT="unknown" ;;
+  ${AGENT_ROOT}/*) ;;
+  *) exit 0 ;;
 esac
 
-# Only notify for sub-agent sessions, not interactive or orchestrator
-case "$AGENT" in
-  unknown|${AGENT_NAME}) exit 0 ;;
-esac
+# Find the tmux session whose pane runs in that directory — works for ANY
+# configured cc_agent (workspace, code, research...), not a hardcoded name.
+# No matching pane means this isn't a tmux-driven agent (the bot's own
+# claude -p invocations, or a plain interactive session) — stay quiet.
+TMUX_SESSION=$(tmux list-panes -a -F '#{session_name} #{pane_current_path}' 2>/dev/null \
+  | awk -v cwd="$CWD" '$2 == cwd {print $1; exit}')
+[ -z "$TMUX_SESSION" ] && exit 0
+AGENT="$TMUX_SESSION"
 
 case "$TYPE" in
   permission_prompt)
-    TMUX_SESSION="${AGENT_NAME}-code"
-    if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-      # Brief settle so we don't capture before Claude finishes drawing the prompt.
-      sleep 0.4
-      PANE_CONTENT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -20 2>/dev/null)
-      QUESTION=$(echo "$PANE_CONTENT" | grep "Do you want to" | tail -1)
-      COMMAND=$(echo "$PANE_CONTENT" | grep -A1 "Bash command\|command:" | tail -1 | sed 's/^[[:space:]]*//')
-      HAS_PERSISTENT=$(echo "$PANE_CONTENT" | grep -c "don't ask again")
+    # Brief settle so we don't capture before Claude finishes drawing the prompt.
+    sleep 0.4
+    PANE_CONTENT=$(tmux capture-pane -t "$TMUX_SESSION" -p -S -20 2>/dev/null)
+    QUESTION=$(echo "$PANE_CONTENT" | grep "Do you want to" | tail -1)
+    COMMAND=$(echo "$PANE_CONTENT" | grep -A1 "Bash command\|command:" | tail -1 | sed 's/^[[:space:]]*//')
+    HAS_PERSISTENT=$(echo "$PANE_CONTENT" | grep -c "don't ask again")
 
-      # If we can't see an actual prompt, this is a stale or auto-resolved
-      # notification (common under --dangerously-skip-permissions). Suppress
-      # rather than wake the user for a non-decision.
-      if [ -z "$QUESTION" ] && [ -z "$COMMAND" ]; then
-        exit 0
-      fi
+    # If we can't see an actual prompt, this is a stale or auto-resolved
+    # notification (common under --dangerously-skip-permissions). Suppress
+    # rather than wake the user for a non-decision.
+    if [ -z "$QUESTION" ] && [ -z "$COMMAND" ]; then
+      exit 0
+    fi
 
-      APPROVAL_ID="approval-$(date +%s)"
-      cat > "$PENDING_DIR/${APPROVAL_ID}.json" <<EOF
+    APPROVAL_ID="approval-$(date +%s)-$$"
+    cat > "$PENDING_DIR/${APPROVAL_ID}.json" <<EOF
 {"id":"$APPROVAL_ID","session":"$TMUX_SESSION","question":"$(echo "$QUESTION" | sed 's/"/\\"/g')","command":"$(echo "$COMMAND" | sed 's/"/\\"/g')","has_persistent":$HAS_PERSISTENT,"timestamp":"$(date -Iseconds)"}
 EOF
 
-      MSG="🔐 *Permission Request*%0AAgent: \`$AGENT\`%0A"
-      [ -n "$COMMAND" ] && MSG+="Command: \`$(echo "$COMMAND" | head -c 200)\`%0A"
-      MSG+="$QUESTION%0A%0A/approve $APPROVAL_ID%0A"
-      [ "$HAS_PERSISTENT" -gt 0 ] && MSG+="/approve_always $APPROVAL_ID%0A"
-      MSG+="/deny $APPROVAL_ID"
-    else
-      MSG="🔐 Permission needed for \`$AGENT\`"
-    fi
+    MSG="🔐 *Permission Request*%0AAgent: \`$AGENT\`%0A"
+    [ -n "$COMMAND" ] && MSG+="Command: \`$(echo "$COMMAND" | head -c 200)\`%0A"
+    MSG+="$QUESTION%0A%0A/approve $APPROVAL_ID%0A"
+    [ "$HAS_PERSISTENT" -gt 0 ] && MSG+="/approve_always $APPROVAL_ID%0A"
+    MSG+="/deny $APPROVAL_ID"
     curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
       -d "chat_id=${OWNER_ID}" -d "text=${MSG}" -d "parse_mode=Markdown" > /dev/null 2>&1 &
     ;;

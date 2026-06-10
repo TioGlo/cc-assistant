@@ -105,6 +105,7 @@ if [ ! -f "$AGENT_ROOT/config.yaml" ]; then
         -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
         -e "s|{{AGENT_NAME}}|${AGENT_NAME}|g" \
         "$SCRIPT_DIR/config.example.yaml" > "$AGENT_ROOT/config.yaml"
+    chmod 600 "$AGENT_ROOT/config.yaml"   # holds the bot token
     echo "  Created $AGENT_ROOT/config.yaml — edit with your settings"
 else
     echo "  Config already exists, skipping"
@@ -283,7 +284,7 @@ for template in "$SCRIPT_DIR"/hooks/*.template; do
             -e "s|{{AGENT_ROOT}}|${AGENT_ROOT}|g" \
             -e "s|{{AGENT_NAME}}|${AGENT_NAME}|g" \
             "$template" > "$target"
-        chmod +x "$target"
+        chmod 700 "$target"
         echo "  Created $target"
     fi
 done
