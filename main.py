@@ -108,9 +108,22 @@ def main() -> None:
         scheduler.load_jobs()
         scheduler.load_reminders()
         logger.info("Scheduler started")
-        await slack_monitor.start()
-        await discord_bot.start()
-        await bot.warmup_voice()
+        # Optional components must not take the daemon down with them: a
+        # Slack/Discord API hiccup at boot would otherwise crash post_init
+        # and put systemd into a restart loop while Telegram — the primary
+        # surface — was perfectly capable of running.
+        try:
+            await slack_monitor.start()
+        except Exception:
+            logger.exception("Slack monitor failed to start; continuing without it")
+        try:
+            await discord_bot.start()
+        except Exception:
+            logger.exception("Discord bot failed to start; continuing without it")
+        try:
+            await bot.warmup_voice()
+        except Exception:
+            logger.exception("Voice warmup failed; lazy warmup may recover on first use")
 
     async def post_shutdown(application) -> None:
         await discord_bot.stop()

@@ -40,9 +40,14 @@ logger = logging.getLogger(__name__)
 _PRIORITY_TAG_RE = re.compile(
     r"<!--\s*PRIORITY\s*:\s*(action|fyi|silent_log)\s*-->", re.IGNORECASE
 )
-_SILENT_LOG_PATH = Path("~/.assistant/workspace/data/telegram-silent-log.jsonl").expanduser()
 _QUIET_HOURS_START = 21  # 21:00 local
 _QUIET_HOURS_END = 8     # 08:00 local
+
+
+def _silent_log_path() -> Path:
+    """Resolved lazily — paths.init() runs after this module is imported,
+    and hardcoding ~/.assistant would break --agent-dir installs."""
+    return paths.workspace() / "data" / "telegram-silent-log.jsonl"
 
 
 def _extract_priority(text: str) -> tuple[str | None, str]:
@@ -135,15 +140,17 @@ class AssistantBot:
             "text": text,
         }
 
+        log_path = _silent_log_path()
+
         def _write() -> None:
-            _SILENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with _SILENT_LOG_PATH.open("a") as f:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a") as f:
                 f.write(json.dumps(entry) + "\n")
 
         try:
             await asyncio.get_event_loop().run_in_executor(None, _write)
         except Exception:
-            logger.exception("Failed to append to silent log at %s", _SILENT_LOG_PATH)
+            logger.exception("Failed to append to silent log at %s", log_path)
 
     async def _send_chunk(
         self, chat_id: int, chunk: str, disable_notification: bool = False
@@ -510,7 +517,7 @@ class AssistantBot:
     async def cmd_codecheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return
-        if not await self.tmux.default_session_name_exists():
+        if not await self.tmux.session_exists():
             await update.message.reply_text(
                 f"No tmux session '{self.tmux.default_session_name}'. It will be created on next /code dispatch."
             )
@@ -780,12 +787,27 @@ class AssistantBot:
 
     # -- Lifecycle --
 
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Application-wide error handler. Without one, PTB only logs handler
+        exceptions and the owner gets dead silence (e.g. a command that
+        crashes mid-way). Log it and tell the owner something broke."""
+        logger.error("Unhandled error in Telegram handler", exc_info=context.error)
+        err = context.error
+        try:
+            await self.app.bot.send_message(
+                chat_id=self.config.telegram.owner_id,
+                text=f"⚠️ Internal error: {type(err).__name__}: {err}",
+            )
+        except Exception:
+            logger.exception("Failed to notify owner of handler error")
+
     def build(self) -> Application:
         self.app = (
             Application.builder()
             .token(self.config.telegram.bot_token)
             .build()
         )
+        self.app.add_error_handler(self._on_error)
         # Core commands
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("reset", self.cmd_reset))

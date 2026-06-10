@@ -63,9 +63,14 @@ def entries_since(
     cutoff = timestamp.isoformat(timespec="seconds")
     out = []
     for e in read_all():
+        # Tolerate wrong-shape entries (hand edit, torn write that still
+        # parses): a KeyError here would break ALL inbound chat, since this
+        # runs on the user-message hot path.
+        if not isinstance(e, dict) or not isinstance(e.get("timestamp"), str):
+            continue
         if e["timestamp"] <= cutoff:
             continue
-        if exclude_sources and e["source"] in exclude_sources:
+        if exclude_sources and e.get("source") in exclude_sources:
             continue
         out.append(e)
     return out
@@ -76,6 +81,6 @@ def render_for_prompt(entries: list[dict]) -> str:
         return ""
     lines = ["Recent Telegram activity from other sessions:"]
     for e in entries:
-        ts = e["timestamp"].replace("T", " ")
-        lines.append(f"[{ts} {e['source']}] {e['text']}")
+        ts = str(e.get("timestamp", "")).replace("T", " ")
+        lines.append(f"[{ts} {e.get('source', '?')}] {e.get('text', '')}")
     return "\n".join(lines)
