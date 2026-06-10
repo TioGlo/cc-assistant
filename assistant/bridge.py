@@ -109,7 +109,10 @@ class ClaudeBridge:
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self.config.timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass  # exited in the window between timeout and kill
             await proc.wait()  # reap — kill() alone leaves a zombie
             self._log_usage(model=used_model, started=started, ok=False,
                             error=f"timeout after {self.config.timeout}s")

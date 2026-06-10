@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from telegram import Update
+from telegram.error import NetworkError as TelegramNetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -532,6 +533,11 @@ class AssistantBot:
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return
+        # Edited messages arrive with update.message=None (the payload is in
+        # update.edited_message); we deliberately ignore edits rather than
+        # re-process them.
+        if update.message is None:
+            return
         text = update.message.text
         if not text:
             return
@@ -625,6 +631,8 @@ class AssistantBot:
             return
 
         message = update.message
+        if message is None:  # edited message — ignore
+            return
         file_id = None
         suffix = ".jpg"
         if message.photo:
@@ -663,6 +671,8 @@ class AssistantBot:
     async def handle_voice_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Transcribe a Telegram voice note and route the text through handle_message."""
         if not self._is_owner(update):
+            return
+        if update.message is None:  # edited message — ignore
             return
         voice = update.message.voice
         if voice is None:
@@ -790,13 +800,22 @@ class AssistantBot:
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Application-wide error handler. Without one, PTB only logs handler
         exceptions and the owner gets dead silence (e.g. a command that
-        crashes mid-way). Log it and tell the owner something broke."""
-        logger.error("Unhandled error in Telegram handler", exc_info=context.error)
+        crashes mid-way). Log it and tell the owner something broke.
+
+        Notify only for errors raised while processing an actual update:
+        polling/transport errors (Conflict, NetworkError, TimedOut) arrive
+        here with update=None on every retry — during a Telegram outage that
+        would ping the owner every ~30s for something self-healing.
+        """
         err = context.error
+        logger.error("Unhandled error in Telegram handler", exc_info=err)
+        if update is None or isinstance(err, TelegramNetworkError):
+            return
         try:
             await self.app.bot.send_message(
                 chat_id=self.config.telegram.owner_id,
                 text=f"⚠️ Internal error: {type(err).__name__}: {err}",
+                disable_notification=_in_quiet_hours(),
             )
         except Exception:
             logger.exception("Failed to notify owner of handler error")

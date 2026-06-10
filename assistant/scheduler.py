@@ -88,6 +88,9 @@ class Scheduler:
         # check, frequent edits to scheduler-jobs.json starve every
         # interval job (e.g. the 55m heartbeat) indefinitely.
         self._loaded_job_defs: dict[str, dict] = {}
+        # Last time each job's failure was escalated to an action push —
+        # used to rate-limit repeat pings from a chronically failing job.
+        self._failure_escalated: dict[str, datetime] = {}
 
     def set_callback(self, callback: JobCallback) -> None:
         self._callback = callback
@@ -165,10 +168,16 @@ class Scheduler:
             ) from e
 
     def _save_dynamic_jobs(self, jobs: list[dict]) -> None:
+        # If an external edit landed since our last fingerprint, the
+        # load-modify-write above this call already merged its DATA into
+        # `jobs`, but the live APScheduler triggers were never synced with
+        # it. Leave the fingerprint stale in that case so the watcher still
+        # fires a reload; otherwise refresh it so our own write doesn't
+        # trigger a redundant one.
+        external_pending = self._mtime(self._jobs_file) != self._jobs_file_mtime
         atomic_write_text(self._jobs_file, json.dumps(jobs, indent=2))
-        # Update fingerprint so the watcher doesn't treat our own write as an
-        # external edit and trigger a redundant reload.
-        self._jobs_file_mtime = self._mtime(self._jobs_file)
+        if not external_pending:
+            self._jobs_file_mtime = self._mtime(self._jobs_file)
 
     def _append_dynamic_job(self, name: str, prompt: str, cron_expr: str | None,
                             working_dir: str | None = None, session: str = "chat",
@@ -181,7 +190,7 @@ class Scheduler:
                             resume: bool = False,
                             enabled: bool = True) -> None:
         jobs = self._load_dynamic_jobs()
-        jobs = [j for j in jobs if j["name"] != name]
+        jobs = [j for j in jobs if not (isinstance(j, dict) and j.get("name") == name)]
         entry = {"name": name,
                  "working_dir": working_dir, "created_at": datetime.now().isoformat()}
         if command:
@@ -231,8 +240,11 @@ class Scheduler:
             ) from e
 
     def _save_reminders(self, reminders: list[dict]) -> None:
+        # Same external-edit handling as _save_dynamic_jobs.
+        external_pending = self._mtime(self._reminders_file) != self._reminders_file_mtime
         atomic_write_text(self._reminders_file, json.dumps(reminders, indent=2))
-        self._reminders_file_mtime = self._mtime(self._reminders_file)
+        if not external_pending:
+            self._reminders_file_mtime = self._mtime(self._reminders_file)
 
     def _append_reminder(self, reminder_id: str, prompt: str, run_at: datetime,
                          session: str = "chat") -> None:
@@ -247,12 +259,13 @@ class Scheduler:
 
     def _remove_reminder(self, reminder_id: str) -> None:
         reminders = self._load_reminders()
-        filtered = [r for r in reminders if r["id"] != reminder_id]
+        filtered = [r for r in reminders
+                    if not (isinstance(r, dict) and r.get("id") == reminder_id)]
         self._save_reminders(filtered)
 
     def _remove_dynamic_job(self, name: str) -> bool:
         jobs = self._load_dynamic_jobs()
-        filtered = [j for j in jobs if j["name"] != name]
+        filtered = [j for j in jobs if not (isinstance(j, dict) and j.get("name") == name)]
         self._loaded_job_defs.pop(name, None)
         if len(filtered) < len(jobs):
             self._save_dynamic_jobs(filtered)
@@ -268,7 +281,9 @@ class Scheduler:
         they're managed through the dynamic system like any other job.
         """
         dynamic = self._load_dynamic_jobs()
-        dynamic_names = {j["name"] for j in dynamic}
+        # Tolerate malformed entries (kept on disk by design) — strict
+        # indexing here would crash boot before tolerant load_jobs ever runs.
+        dynamic_names = {j.get("name") for j in dynamic if isinstance(j, dict)}
         seeded = 0
         for job in jobs:
             if job.name not in dynamic_names:
@@ -402,7 +417,7 @@ class Scheduler:
         # We can't perfectly tell which non-job_ ids are reminders without state,
         # so be conservative: only remove ones present in the reminders file.
         on_disk = self._load_reminders()
-        on_disk_ids = {r["id"] for r in on_disk}
+        on_disk_ids = {r["id"] for r in on_disk if isinstance(r, dict) and "id" in r}
         for rid in (existing_reminder_ids & on_disk_ids):
             try:
                 self._scheduler.remove_job(rid)
@@ -632,14 +647,24 @@ class Scheduler:
         logger.info("Added %s job: %s (%s,%s)", kind_label, name, schedule_label, extra)
         return job_id
 
-    @staticmethod
-    def _failure_delivery(delivery: dict | None) -> JobDelivery:
+    # A chronically failing job escalates once, then goes quiet (silent log
+    # only) until the cooldown lapses or a success resets it — one broken
+    # 15-minute cron must not become a ping every 15 minutes.
+    FAILURE_REPING_COOLDOWN = timedelta(hours=6)
+
+    def _failure_delivery(self, job_name: str, delivery: dict | None) -> JobDelivery:
         """Delivery override for failure notifications: keep the configured
         transport/channel but force priority to 'action'. A job configured
         silent_log must not FAIL silently — before this, failures landed in
         the silent log and the owner never saw them."""
         d = dict(delivery or {})
-        d["priority"] = "action"
+        now = datetime.now()
+        last = self._failure_escalated.get(job_name)
+        if last and now - last < self.FAILURE_REPING_COOLDOWN:
+            d["priority"] = "silent_log"
+        else:
+            self._failure_escalated[job_name] = now
+            d["priority"] = "action"
         return JobDelivery(**d)
 
     async def _run_command_job(self, job_name: str, command: str,
@@ -664,16 +689,21 @@ class Scheduler:
                     proc.communicate(), timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
-                proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()  # reap — kill() alone leaves a zombie
                 msg = f"⏱ `{job_name}` timed out after {timeout_seconds}s"
                 if self._callback:
-                    await self._callback(job_name, msg, self._failure_delivery(delivery))
+                    await self._callback(job_name, msg,
+                                         self._failure_delivery(job_name, delivery))
                 return
         except Exception as e:
             logger.exception("Command job %s failed to spawn", job_name)
             if self._callback:
                 await self._callback(job_name, f"❌ `{job_name}` spawn failed: {e}",
-                                     self._failure_delivery(delivery))
+                                     self._failure_delivery(job_name, delivery))
             return
 
         out = stdout.decode(errors="replace").strip()
@@ -684,8 +714,10 @@ class Scheduler:
             tail = (err or out or "(no output)")[-1500:]
             msg = f"❌ `{job_name}` exit {rc}\n```\n{tail}\n```"
             if self._callback:
-                await self._callback(job_name, msg, self._failure_delivery(delivery))
+                await self._callback(job_name, msg,
+                                     self._failure_delivery(job_name, delivery))
             return
+        self._failure_escalated.pop(job_name, None)
         if not out:
             if silent_on_empty:
                 logger.info("Command job %s produced no output; skipping delivery", job_name)
@@ -723,6 +755,7 @@ class Scheduler:
                 # we don't want those one-shot IDs polluting session.json.
                 if resume and new_session_id:
                     self.session_manager.set_session_id(new_session_id, session)
+                self._failure_escalated.pop(job_name, None)
                 if self._callback:
                     await self._callback(job_name, result_text, delivery_obj)
                 return
@@ -736,7 +769,7 @@ class Scheduler:
         if self._callback:
             await self._callback(
                 job_name, f"Job failed after {max_retries} attempts. Check logs.",
-                self._failure_delivery(delivery),
+                self._failure_delivery(job_name, delivery),
             )
 
     async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
