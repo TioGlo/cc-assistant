@@ -158,22 +158,32 @@ class AssistantBot:
     ) -> None:
         """Send one chunk with Telegram Markdown rendering. Falls back to
         plain text on any parse error so a stray '*' or '_' in the model's
-        output never blocks delivery.
+        output never blocks delivery. Transient network errors get a short
+        retry — by the time we're here all side effects have already run,
+        so re-sending is the one delivery retry that's actually safe.
         """
-        try:
-            await self.app.bot.send_message(
-                chat_id=chat_id,
-                text=to_telegram_markdown(chunk),
-                parse_mode="Markdown",
-                disable_notification=disable_notification,
-            )
-        except Exception as e:
-            logger.debug("Markdown send failed (%s); falling back to plain", e)
-            await self.app.bot.send_message(
-                chat_id=chat_id,
-                text=strip_markdown(chunk),
-                disable_notification=disable_notification,
-            )
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=to_telegram_markdown(chunk),
+                    parse_mode="Markdown",
+                    disable_notification=disable_notification,
+                )
+                return
+            except TelegramNetworkError:
+                if attempt == 2:
+                    raise
+                logger.warning("Telegram send network error (attempt %d/3); retrying", attempt + 1)
+                await asyncio.sleep(5 * (attempt + 1))
+            except Exception as e:
+                logger.debug("Markdown send failed (%s); falling back to plain", e)
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=strip_markdown(chunk),
+                    disable_notification=disable_notification,
+                )
+                return
 
     async def _reply(self, update: Update, text: str) -> None:
         """update.message.reply_text with Markdown + plain fallback."""
@@ -369,7 +379,7 @@ class AssistantBot:
             f"={summary['jobs_unchanged']} unchanged, "
             f"−{summary['jobs_removed']} removed.\n"
             f"Reminders: {summary['reminders_loaded']} active, "
-            f"{summary['reminders_expired']} expired."
+            f"{summary['reminders_late']} delivered late."
         )
         if summary.get("malformed"):
             text += (

@@ -455,13 +455,17 @@ class Scheduler:
                 pass
 
         reminder_added = 0
-        reminder_dropped = 0
+        reminder_late = 0
         surviving = []
         for r in on_disk:
             try:
                 run_at = datetime.fromisoformat(r["run_at"])
                 if run_at <= now:
-                    reminder_dropped += 1
+                    # Came due while we weren't looking (downtime before the
+                    # reload, or a lapsed misfire window) — deliver late.
+                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 5 * reminder_late)
+                    reminder_late += 1
+                    surviving.append(r)
                     continue
                 self._scheduler.add_job(
                     self._run_reminder, trigger="date", run_date=run_at, id=r["id"],
@@ -488,24 +492,46 @@ class Scheduler:
             "jobs_skipped": skipped,
             "malformed": malformed,
             "reminders_loaded": reminder_added,
-            "reminders_expired": reminder_dropped,
+            "reminders_late": reminder_late,
         }
         logger.info("Reload: %s", summary)
         return summary
 
+    def _schedule_late_reminder(self, r: dict, run_at: datetime, delay_seconds: int) -> None:
+        """Deliver a reminder whose fire time passed while the daemon was
+        down (or while a misfire window lapsed) instead of silently
+        discarding it — a missed reminder the owner never hears about is
+        worse than a late one."""
+        due_label = run_at.strftime("%Y-%m-%d %H:%M")
+        self._scheduler.add_job(
+            self._run_reminder, trigger="date",
+            run_date=datetime.now() + timedelta(seconds=delay_seconds),
+            id=r["id"], name=f"missed reminder (was due {due_label})",
+            replace_existing=True,
+            kwargs={"reminder_id": r["id"],
+                    "prompt": (f"[Missed reminder — was due {due_label}, the service "
+                               f"wasn't running at fire time; delivering late] {r['prompt']}"),
+                    "session": r.get("session", "chat")},
+        )
+        logger.info("Reminder %s was due %s; delivering late", r["id"], due_label)
+
     def load_reminders(self) -> None:
-        """Reload persisted reminders that haven't fired yet."""
+        """Reload persisted reminders that haven't fired yet; reminders that
+        came due during downtime are delivered late (staggered)."""
         now = datetime.now()
         reminders = self._load_reminders()
         surviving = []
+        late = 0
         existing = {j.id for j in self._scheduler.get_jobs()}
         for r in reminders:
             try:
                 run_at = datetime.fromisoformat(r["run_at"])
-                if run_at <= now:
-                    logger.info("Discarding expired reminder: %s", r["id"])
-                    continue
                 if r["id"] in existing:
+                    surviving.append(r)
+                    continue
+                if run_at <= now:
+                    self._schedule_late_reminder(r, run_at, delay_seconds=5 + 5 * late)
+                    late += 1
                     surviving.append(r)
                     continue
                 self._scheduler.add_job(
@@ -519,7 +545,6 @@ class Scheduler:
             except Exception:
                 surviving.append(r)
                 logger.exception("Skipping malformed reminder entry (left on disk): %r", r)
-        # Clean up expired entries
         if len(surviving) != len(reminders):
             self._save_reminders(surviving)
 
@@ -777,21 +802,19 @@ class Scheduler:
         # session bounded.
         session_id = self.session_manager.get_session_id(session) if resume else None
         max_retries = 3
+        result_text = ""
+        new_session_id = None
+        # Retry scope covers ONLY the claude invocation. The delivery
+        # callback used to live inside this try-block, so a transient
+        # Telegram failure re-ran the entire LLM job (wasted tokens) and
+        # its side effects (duplicate delegations) up to three times.
         for attempt in range(max_retries):
             try:
                 result_text, new_session_id = await self.bridge.send_simple(
                     prompt, session_id=session_id, working_dir=working_dir,
                     model=model or None,
                 )
-                # Only persist the new session ID when this job is opted into
-                # resume — stateless jobs spawn a fresh session each fire and
-                # we don't want those one-shot IDs polluting session.json.
-                if resume and new_session_id:
-                    self.session_manager.set_session_id(new_session_id, session)
-                self._failure_escalated.pop(job_name, None)
-                if self._callback:
-                    await self._callback(job_name, result_text, delivery_obj)
-                return
+                break
             except Exception as e:
                 logger.error("Job %s attempt %d failed: %s", job_name, attempt + 1, e)
                 if session_id and "No conversation found" in str(e):
@@ -799,11 +822,33 @@ class Scheduler:
                     session_id = None
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt * 5)
+        else:
+            if self._callback:
+                await self._callback(
+                    job_name, f"Job failed after {max_retries} attempts. Check logs.",
+                    self._failure_delivery(job_name, delivery),
+                )
+            return
+
+        # Only persist the new session ID when this job is opted into
+        # resume — stateless jobs spawn a fresh session each fire and
+        # we don't want those one-shot IDs polluting session.json.
+        if resume and new_session_id:
+            self.session_manager.set_session_id(new_session_id, session)
+        self._failure_escalated.pop(job_name, None)
         if self._callback:
-            await self._callback(
-                job_name, f"Job failed after {max_retries} attempts. Check logs.",
-                self._failure_delivery(job_name, delivery),
-            )
+            try:
+                await self._callback(job_name, result_text, delivery_obj)
+            except Exception:
+                # Deliberately no callback retry: on_job_result runs side
+                # effects (SCHEDULE/DELEGATE processing) before sending, so
+                # re-invoking it would duplicate delegations. Transient sends
+                # are retried inside the bot's send path; if delivery still
+                # failed, preserve the result here for recovery.
+                logger.exception(
+                    "Job %s: delivery failed; result preserved here:\n%s",
+                    job_name, result_text[:2000],
+                )
 
     async def _run_reminder(self, reminder_id: str, prompt: str, working_dir: str | None = None,
                             session: str = "chat") -> None:
