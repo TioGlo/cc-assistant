@@ -640,6 +640,21 @@ class Scheduler:
                                  silent_on_empty=silent_on_empty)
         return job_id
 
+    def add_internal_cron(self, func, cron_expr: str, job_id: str, name: str,
+                          misfire_grace_time: int = 4 * 3600) -> None:
+        """Schedule an internal (non-persisted) job, like the file watcher.
+        The generous misfire grace makes daily housekeeping jobs fire on
+        wake when the machine was suspended at the scheduled time, instead
+        of being silently skipped."""
+        parts = cron_expr.strip().split()
+        if len(parts) != 5:
+            raise ValueError(f"internal job {job_id}: expected 5-field cron, got {cron_expr!r}")
+        trigger = CronTrigger(minute=parts[0], hour=parts[1], day=parts[2],
+                              month=parts[3], day_of_week=_translate_dow(parts[4]))
+        self._scheduler.add_job(func, trigger=trigger, id=job_id, name=name,
+                                replace_existing=True,
+                                misfire_grace_time=misfire_grace_time)
+
     def add_one_shot(self, prompt: str, delay: str, working_dir: str | None = None,
                      session: str = "chat") -> str:
         delta = parse_delay(delay)

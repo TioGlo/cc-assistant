@@ -162,6 +162,16 @@ class DiscordConfig:
 
 
 @dataclass
+class NotificationsConfig:
+    """Unprompted-output settings. The digest is the catch-up path for
+    silent-logged items: one cheap-model invocation at quiet-hours end that
+    curates ruthlessly — and sends nothing at all when nothing mattered."""
+    digest_enabled: bool = True
+    digest_cron: str = "0 8 * * *"   # quiet-hours end; fires on wake if suspended
+    digest_model: str = "haiku"      # curation is routing work — cheap model
+
+
+@dataclass
 class SchedulerConfig:
     jobs: list[ScheduledJob] = field(default_factory=list)
 
@@ -175,6 +185,7 @@ class Config:
     voice: VoiceConfig = field(default_factory=VoiceConfig)
     cc_agents: list[CCAgent] = field(default_factory=list)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
+    notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
 
     @property
     def default_agent(self) -> CCAgent | None:
@@ -205,5 +216,8 @@ def load_config(path: str | Path) -> Config:
 
     discord = DiscordConfig(**raw.get("discord", {}))
 
+    notifications = NotificationsConfig(**(raw.get("notifications") or {}))
+
     return Config(telegram=telegram, claude=claude, scheduler=scheduler,
-                  slack=slack, voice=voice, cc_agents=cc_agents, discord=discord)
+                  slack=slack, voice=voice, cc_agents=cc_agents, discord=discord,
+                  notifications=notifications)

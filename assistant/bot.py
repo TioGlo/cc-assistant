@@ -5,7 +5,7 @@ import logging
 import re
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import Update
@@ -21,6 +21,7 @@ from telegram.ext import (
 from . import paths, telegram_log
 from .bridge import AuthError, BridgeError, ClaudeBridge
 from .config import Config, JobDelivery
+from .fileio import atomic_write_text
 from .formatter import (
     extract_delegate_commands,
     extract_remind_commands,
@@ -212,6 +213,12 @@ class AssistantBot:
         self, job_name: str, result_text: str,
         delivery: JobDelivery | None = None,
     ) -> None:
+        # Telegram priority routing. The model output may carry a
+        # <!--PRIORITY:action|fyi|silent_log--> tag; otherwise the job's
+        # configured default is used, falling back to silent_log.
+        # Extracted BEFORE strip_commands, which now removes PRIORITY tags
+        # (they must never leak verbatim to the user).
+        tag_priority, result_text = _extract_priority(result_text)
         self._process_commands(result_text)
         await self._process_delegations_from_job(result_text)
         clean_text = strip_commands(result_text)
@@ -220,10 +227,6 @@ class AssistantBot:
         if clean_text.strip().upper() in ("HEARTBEAT_OK", "NO_REPLY"):
             return
 
-        # Telegram priority routing. The model output may carry a
-        # <!--PRIORITY:action|fyi|silent_log--> tag; otherwise the job's
-        # configured default is used, falling back to silent_log.
-        tag_priority, clean_text = _extract_priority(clean_text)
         job_default = (delivery and delivery.priority) or "silent_log"
         priority = tag_priority or job_default
 
@@ -248,6 +251,120 @@ class AssistantBot:
             priority=priority, source=f"cron:{job_name}",
         )
         telegram_log.append(job_name, clean_text)
+
+    # -- Silent-log digest --
+
+    DIGEST_PROMPT = (
+        "You are reviewing your own silent notification log — items deliberately "
+        "not pushed to your user when they happened. Write a morning catch-up "
+        "containing ONLY what they would actually want to know.\n"
+        "Rules:\n"
+        "- Be ruthless. Drop routine all-green heartbeats, successful housekeeping, "
+        "and anything without consequence for the user today.\n"
+        "- If nothing is worth mentioning, reply with exactly NO_REPLY.\n"
+        "- Otherwise: at most 6 short lines, most important first. Collapse similar "
+        "items into counts. No preamble, no headers.\n"
+        "- If something needs the user's action today, lead with it and include "
+        "<!--PRIORITY:action--> in your reply.\n\n"
+        "Entries since the last digest:\n"
+    )
+
+    def _digest_state_path(self) -> Path:
+        return paths.workspace() / "data" / "silent-digest-state.json"
+
+    def _read_silent_entries_since(self, since_ts: str) -> list[dict]:
+        """Entries newer than `since_ts` (UTC ISO; '' = all). Tolerates
+        malformed lines — same policy as telegram_log."""
+        path = _silent_log_path()
+        if not path.exists():
+            return []
+        entries: list[dict] = []
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(e, dict) and isinstance(e.get("ts"), str) and e["ts"] > since_ts:
+                    entries.append(e)
+        return entries
+
+    async def run_silent_digest(self) -> None:
+        """Morning catch-up over the silent log: one cheap-model invocation
+        that curates ruthlessly. Zero new entries → zero LLM calls; the model
+        replying NO_REPLY → nothing sent (suppressed by on_job_result). The
+        watermark only advances after a successful delivery attempt, so a
+        failed digest re-covers its window next time."""
+        watermark = ""
+        try:
+            watermark = json.loads(self._digest_state_path().read_text()).get("last_ts", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+        if not watermark:
+            watermark = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+        entries = self._read_silent_entries_since(watermark)
+        if not entries:
+            logger.info("Silent digest: nothing silenced since %s; skipping", watermark)
+            return
+        dropped = max(0, len(entries) - 100)
+        entries = entries[-100:]
+
+        lines = []
+        for e in entries:
+            try:
+                ts_label = datetime.fromisoformat(e["ts"]).astimezone().strftime("%H:%M")
+            except ValueError:
+                ts_label = e["ts"][:16]
+            text = " ".join(str(e.get("text", "")).split())[:400]
+            lines.append(f"[{ts_label} {e.get('source', '?')}] {text}")
+        if dropped:
+            lines.insert(0, f"(…{dropped} older entries omitted)")
+
+        try:
+            result_text, _ = await self.bridge.send_simple(
+                self.DIGEST_PROMPT + "\n".join(lines),
+                model=self.config.notifications.digest_model or None,
+            )
+            await self.on_job_result("morning catch-up", result_text,
+                                     JobDelivery(priority="fyi"))
+        except Exception:
+            logger.exception(
+                "Silent digest failed; watermark not advanced — next digest re-covers this window")
+            return
+        try:
+            atomic_write_text(self._digest_state_path(),
+                              json.dumps({"last_ts": entries[-1]["ts"]}))
+        except OSError:
+            logger.exception("Failed to persist digest watermark")
+
+    async def cmd_silenced(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """On-demand raw view of recent silent-log entries (pull, not push)."""
+        if not self._is_owner(update):
+            return
+        n = 15
+        if context.args:
+            try:
+                n = max(1, min(50, int(context.args[0])))
+            except ValueError:
+                pass
+        entries = self._read_silent_entries_since("")[-n:]
+        if not entries:
+            await update.message.reply_text("Silent log is empty.")
+            return
+        lines = []
+        for e in entries:
+            try:
+                ts_label = datetime.fromisoformat(e["ts"]).astimezone().strftime("%m-%d %H:%M")
+            except ValueError:
+                ts_label = str(e.get("ts"))[:16]
+            text = " ".join(str(e.get("text", "")).split())
+            lines.append(f"[{ts_label} {e.get('source', '?')}] {text[:200]}")
+        for chunk in split_message("\n".join(lines)):
+            await update.message.reply_text(chunk)
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
@@ -309,6 +426,7 @@ class AssistantBot:
             "/cancel <name> - Cancel a scheduled job",
             "/schedule <cron> <prompt> - Schedule a recurring task",
             "/remind <delay> <prompt> - Set a one-shot reminder",
+            "/silenced [n] - Show recent silenced notifications",
             "/code <task> - Dispatch coding task",
             "/codecheck - Check coding session status",
             "/approve <id> - Approve a permission request",
@@ -846,6 +964,7 @@ class AssistantBot:
         self.app.add_handler(CommandHandler("cancel", self.cmd_cancel))
         self.app.add_handler(CommandHandler("schedule", self.cmd_schedule))
         self.app.add_handler(CommandHandler("remind", self.cmd_remind))
+        self.app.add_handler(CommandHandler("silenced", self.cmd_silenced))
         self.app.add_handler(CommandHandler("approve", self.cmd_approve))
         self.app.add_handler(CommandHandler("approve_always", self.cmd_approve_always))
         self.app.add_handler(CommandHandler("deny", self.cmd_deny))

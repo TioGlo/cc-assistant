@@ -8,7 +8,7 @@ from pathlib import Path
 from assistant import paths
 from assistant.bot import AssistantBot
 from assistant.bridge import ClaudeBridge
-from assistant.config import load_config
+from assistant.config import JobDelivery, load_config
 from assistant.discord_bot import DiscordBot
 from assistant.scheduler import Scheduler
 from assistant.session import SessionManager
@@ -67,12 +67,15 @@ def main() -> None:
     discord_bot = DiscordBot(config.discord, assistant_bot=bot)
     bot.set_discord_bot(discord_bot)
 
-    # Tmux dispatch results go to Telegram. The signal file is already
-    # consumed by the time this fires, so a delivery failure must not
-    # propagate into the watcher — preserve the result in the journal.
+    # Tmux dispatch results go to Telegram. fyi by default — the dispatch
+    # path literally promises "You'll be notified when it's done" (the model
+    # can still tag ACTION/silent_log to override). The signal file is
+    # already consumed by the time this fires, so a delivery failure must
+    # not propagate into the watcher — preserve the result in the journal.
     async def on_code_result(task_id: str, result_text: str) -> None:
         try:
-            await bot.on_job_result(f"Code: {task_id}", result_text)
+            await bot.on_job_result(f"Code: {task_id}", result_text,
+                                    JobDelivery(priority="fyi"))
         except Exception:
             logger.exception("Delivery of task %s result failed; preserving here:\n%s",
                              task_id, result_text[:2000])
@@ -117,6 +120,12 @@ def main() -> None:
             scheduler.seed_config_jobs(config.scheduler.jobs)
         scheduler.load_jobs()
         scheduler.load_reminders()
+        if config.notifications.digest_enabled:
+            scheduler.add_internal_cron(
+                bot.run_silent_digest, config.notifications.digest_cron,
+                job_id="_internal_silent_digest", name="silent-log morning digest",
+            )
+            logger.info("Silent-log digest scheduled (%s)", config.notifications.digest_cron)
         logger.info("Scheduler started")
         # Optional components must not take the daemon down with them: a
         # Slack/Discord API hiccup at boot would otherwise crash post_init
