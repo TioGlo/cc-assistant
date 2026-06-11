@@ -5,6 +5,7 @@ import logging
 import re
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -86,6 +87,12 @@ class AssistantBot:
         self.tmux = TmuxDispatch(config.cc_agents or None)
         self._start_time = time.time()
         self._last_user_msg_time = datetime.now()
+        # Agent-initiated dispatch budget (model-emitted DELEGATE blocks).
+        # Bounds accidental runaway chains — a task result that re-DELEGATEs,
+        # a cron loop — each dispatch is a full interactive Claude session.
+        # Owner-typed /code is exempt. In-memory; resets on restart.
+        self._dispatch_times: deque[float] = deque()
+        self._dispatch_budget_notified: float = 0.0
         self.app: Application | None = None
         self.voice_engine: TranscriptionEngine | None = None
         # Set later by main.py via set_discord_bot(); used to route
@@ -213,7 +220,12 @@ class AssistantBot:
     async def on_job_result(
         self, job_name: str, result_text: str,
         delivery: JobDelivery | None = None,
+        allow_commands: bool = True,
     ) -> None:
+        """allow_commands=False turns this into a pure delivery path:
+        SCHEDULE/REMIND/DELEGATE blocks are stripped but never executed.
+        Used for output derived from content arbitrary third parties wrote
+        (Slack triage) — that is not an action surface."""
         # Telegram priority routing. The model output may carry a
         # <!--PRIORITY:action|fyi|silent_log--> tag; otherwise the job's
         # configured default is used, falling back to silent_log.
@@ -227,8 +239,9 @@ class AssistantBot:
             logger.warning("Job %s: unrecognized PRIORITY level in %r; treating as fyi",
                            job_name, PRIORITY_PATTERN.search(result_text).group(0))
             tag_priority = "fyi"
-        self._process_commands(result_text)
-        await self._process_delegations_from_job(result_text)
+        if allow_commands:
+            await self._process_commands(result_text)
+            await self._process_delegations_from_job(result_text)
         clean_text = strip_commands(result_text)
         if not clean_text:
             return
@@ -390,6 +403,8 @@ class AssistantBot:
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
+            if not await self._agent_dispatch_allowed():
+                continue  # budget notification already sent
             session = cmd.session or None
             task = self._enrich_with_project(cmd.task, cmd.project)
             logger.info("Cron job delegating task: %s", cmd.task[:80])
@@ -757,7 +772,7 @@ class AssistantBot:
                     raise
             if new_session_id:
                 self.session_manager.set_session_id(new_session_id, session_key)
-            self._process_commands(response_text)
+            await self._process_commands(response_text)
             await self._process_delegations(response_text, send_text)
             clean_text = strip_commands(response_text)
             if clean_text:
@@ -865,8 +880,25 @@ class AssistantBot:
         logger.info("Voice transcribed (%.1fs): %s", result.duration_seconds or 0, transcript[:80])
         await self._process_user_text(prompt, update)
 
-    def _process_commands(self, text: str) -> None:
+    async def _process_commands(self, text: str) -> None:
         for cmd in extract_schedule_commands(text):
+            if cmd.command and not self.config.scheduler.allow_command_blocks:
+                # Model output is influenced by untrusted content it reads
+                # (web, email, chat surfaces). A command-type job is durable
+                # bash with no model in the loop once persisted — one injected
+                # block would be a persistent backdoor. Blocked by default;
+                # owner opts in via scheduler.allow_command_blocks.
+                logger.warning("Blocked command-type SCHEDULE block %r: %s",
+                               cmd.name, cmd.command[:200])
+                await self._send_text(
+                    self.config.telegram.owner_id,
+                    f"Blocked a command-type SCHEDULE block `{cmd.name}`:\n"
+                    f"```\n{cmd.command[:300]}\n```\n"
+                    f"Command jobs from model output are disabled. If intended, add the "
+                    f"job to config.yaml, or set `scheduler.allow_command_blocks: true`.",
+                    priority="action", source="security",
+                )
+                continue
             try:
                 self.scheduler.add_cron_job(
                     cmd.name, cmd.prompt, cmd.cron or None, cmd.working_dir,
@@ -886,8 +918,37 @@ class AssistantBot:
             except ValueError as e:
                 logger.warning("Invalid remind command: %s", e)
 
+    MAX_AGENT_DISPATCHES_PER_HOUR = 12
+
+    async def _agent_dispatch_allowed(self) -> bool:
+        """Rolling-hour budget for model-emitted DELEGATE dispatches."""
+        now = time.time()
+        while self._dispatch_times and now - self._dispatch_times[0] > 3600:
+            self._dispatch_times.popleft()
+        if len(self._dispatch_times) >= self.MAX_AGENT_DISPATCHES_PER_HOUR:
+            logger.warning("Delegation budget exhausted (%d/h); dispatch blocked",
+                           self.MAX_AGENT_DISPATCHES_PER_HOUR)
+            # Notify at most once per hour — the blocked dispatches themselves
+            # must not become a notification storm.
+            if now - self._dispatch_budget_notified > 3600:
+                self._dispatch_budget_notified = now
+                await self._send_text(
+                    self.config.telegram.owner_id,
+                    f"Delegation budget hit: more than "
+                    f"{self.MAX_AGENT_DISPATCHES_PER_HOUR} agent-initiated dispatches "
+                    f"in an hour — possible runaway DELEGATE loop. Further dispatches "
+                    f"are blocked for now; /code still works.",
+                    priority="action", source="delegation_budget",
+                )
+            return False
+        self._dispatch_times.append(now)
+        return True
+
     async def _process_delegations(self, text: str, send_text) -> None:
         for cmd in extract_delegate_commands(text):
+            if not await self._agent_dispatch_allowed():
+                await send_text("Delegation blocked: hourly dispatch budget exhausted.")
+                continue
             session = cmd.session or None
             task = self._enrich_with_project(cmd.task, cmd.project)
             logger.info("Delegating task: %s", cmd.task[:80])

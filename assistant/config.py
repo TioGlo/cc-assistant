@@ -134,6 +134,10 @@ class DiscordConfig:
     bot_token: str = ""
     enabled: bool = False
     guilds: dict[str, DiscordGuildConfig] = field(default_factory=dict)
+    # Discord user IDs allowed to drive the agent. The agent runs with
+    # bypassPermissions (full shell) — without this gate, ANY member of an
+    # allowlisted channel could drive it. Empty = nobody (fail-secure).
+    owner_ids: list[int | str] = field(default_factory=list)
     # Default mention requirement for any channel not explicitly listed under a guild.
     # Most safe: require mention when channel is unknown.
     default_require_mention: bool = True
@@ -146,6 +150,10 @@ class DiscordConfig:
             else:
                 coerced[str(gid)] = cfg
         self.guilds = coerced
+        self.owner_ids = [str(x) for x in self.owner_ids]
+
+    def is_owner(self, user_id: int | str) -> bool:
+        return str(user_id) in self.owner_ids
 
     def channel_requires_mention(self, guild_id: int | str | None, channel_id: int | str) -> bool | None:
         """Return True/False if the channel is allowlisted, None if it isn't.
@@ -174,6 +182,13 @@ class NotificationsConfig:
 @dataclass
 class SchedulerConfig:
     jobs: list[ScheduledJob] = field(default_factory=list)
+    # Whether model-emitted SCHEDULE blocks may create command-type jobs
+    # (persistent bash, no LLM in the loop once persisted). Off by default:
+    # model output is influenced by untrusted content it reads, and a single
+    # injected block would otherwise become a durable backdoor. Command jobs
+    # defined in config.yaml (this file) are always allowed — they're
+    # owner-authored.
+    allow_command_blocks: bool = False
 
 
 @dataclass
@@ -205,7 +220,10 @@ def load_config(path: str | Path) -> Config:
     jobs_raw = sched_raw.pop("jobs", [])
     sched_raw.pop("db_path", None)  # legacy field, ignored
     jobs = [ScheduledJob(**j) for j in jobs_raw]
-    scheduler = SchedulerConfig(jobs=jobs)
+    scheduler = SchedulerConfig(
+        jobs=jobs,
+        allow_command_blocks=bool(sched_raw.pop("allow_command_blocks", False)),
+    )
 
     slack = SlackConfig(**raw.get("slack", {}))
 

@@ -55,6 +55,10 @@ claude:
 # discord:
 #   enabled: true
 #   bot_token: "YOUR_DISCORD_BOT_TOKEN"
+#   owner_ids: ["YOUR_DISCORD_USER_ID"]  # REQUIRED: only these users can drive
+#                                        # the agent. It runs with full shell
+#                                        # access — empty means nobody (the bot
+#                                        # ignores all messages and logs why).
 #   default_require_mention: true   # safe default for any unlisted channel
 #   guilds:
 #     "1234567890123456789":        # guild (server) ID
@@ -64,16 +68,20 @@ claude:
 #         "1111111111111111111":
 #           requireMention: true    # respond only when @-mentioned
 
-# Optional: Slack monitoring
+# Optional: Slack monitoring. The monitor buffers EVERY message from EVERY
+# user in watched channels and periodically feeds the batch to the agent for
+# triage — point it only at channels whose content you'd paste to the agent
+# yourself. Triage output is delivery-only: SCHEDULE/DELEGATE blocks in it
+# are never executed.
 # slack:
 #   enabled: true
 #   bot_token: "xoxb-..."
 #   app_token: "xapp-..."
-#   triage_interval: 900
+#   triage_interval: 900     # seconds between triage batches
+#   history_limit: 50        # max buffered messages per batch (oldest drop)
 #   channels:
 #     "#general":
-#       enabled: true
-#       requireMention: false
+#       enabled: true        # set false to pause a channel without deleting it
 
 # Claude Code tmux agents for task delegation
 # The first agent is the default target for DELEGATE blocks.
@@ -98,6 +106,14 @@ cc_agents:
   #   model: "sonnet"        # use a cheaper model for high-volume background work
 
 scheduler:
+  # Whether model-emitted SCHEDULE blocks may create `command:` jobs
+  # (persistent bash that runs with no model in the loop once persisted).
+  # Off by default: model output is influenced by untrusted content it reads
+  # (web pages, email, chat), and one injected block would be a durable
+  # backdoor. Command jobs defined HERE in config.yaml are always allowed.
+  # Blocked attempts notify you with the exact command.
+  allow_command_blocks: false
+
   # Seed jobs — merged into scheduler-jobs.json on first run, then managed dynamically.
   # The agent can create/modify jobs at runtime via SCHEDULE blocks.
   # Config seeds only run once — editing here after first run has no effect.

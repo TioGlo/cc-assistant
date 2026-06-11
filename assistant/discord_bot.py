@@ -45,6 +45,7 @@ class DiscordBot:
         self.client: discord.Client | None = None
         self._task: asyncio.Task | None = None
         self._ready = asyncio.Event()
+        self._warned_no_owners = False
 
     # -- Lifecycle --
 
@@ -110,6 +111,24 @@ class DiscordBot:
 
         # Skip DMs for now (allowlist is per-guild)
         if message.guild is None:
+            return
+
+        # Owner gate. The agent runs with bypassPermissions — full shell and
+        # filesystem — so the channel allowlist alone is NOT an authorization
+        # boundary: any channel member could otherwise drive it. Fail-secure
+        # when no owners are configured.
+        if not self.config.owner_ids:
+            if not self._warned_no_owners:
+                self._warned_no_owners = True
+                logger.warning(
+                    "Discord is enabled but discord.owner_ids is empty — "
+                    "ignoring ALL messages. Add your Discord user ID to "
+                    "config.yaml to use the Discord surface."
+                )
+            return
+        if not self.config.is_owner(message.author.id):
+            logger.info("Discord message from non-owner %s (%s) ignored",
+                        message.author.name, message.author.id)
             return
 
         # Allowlist check

@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Awaitable
+from dataclasses import dataclass
 
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
 from slack_sdk.socket_mode.response import SocketModeResponse
+
+from .config import SlackConfig
 
 logger = logging.getLogger(__name__)
 
@@ -52,16 +53,6 @@ class SlackMessage:
     user: str
     text: str
     timestamp: float
-
-
-@dataclass
-class SlackConfig:
-    bot_token: str
-    app_token: str
-    channels: dict[str, dict] = field(default_factory=dict)
-    history_limit: int = 50
-    triage_interval: int = 900  # seconds between triage runs (default 15 min)
-    enabled: bool = True
 
 
 class SlackMonitor:
@@ -129,10 +120,15 @@ class SlackMonitor:
             pass
 
     async def _resolve_channels(self) -> None:
-        """Map configured channel names to Slack channel IDs."""
-        configured_names = {
-            name.lstrip("#"): name for name in self.config.channels
-        }
+        """Map configured channel names to Slack channel IDs. Channels with
+        `enabled: false` in their per-channel config are skipped (reversible
+        pause without deleting the entry)."""
+        configured_names = {}
+        for name, ch_cfg in self.config.channels.items():
+            if isinstance(ch_cfg, dict) and not ch_cfg.get("enabled", True):
+                logger.info("Slack channel %s disabled by config; not watching", name)
+                continue
+            configured_names[name.lstrip("#")] = name
 
         cursor = None
         while True:
@@ -151,10 +147,11 @@ class SlackMonitor:
             if not cursor:
                 break
 
-        # Warn about unresolved channels
+        # Warn about unresolved channels (normalize the leading '#' so a
+        # config entry written without it doesn't warn spuriously)
         resolved_names = set(self._channel_id_map.values())
-        for name in self.config.channels:
-            if name not in resolved_names:
+        for name in configured_names.values():
+            if f"#{name.lstrip('#')}" not in resolved_names:
                 logger.warning("Could not resolve Slack channel: %s", name)
 
     async def _handle_event(self, client: SocketModeClient, req: SocketModeRequest) -> None:
@@ -190,6 +187,10 @@ class SlackMonitor:
 
         async with self._buffer_lock:
             self._buffer.append(msg)
+            # history_limit caps the triage batch: bounds both memory and the
+            # size of the prompt fed to the model. Oldest messages drop first.
+            if len(self._buffer) > self.config.history_limit:
+                del self._buffer[: -self.config.history_limit]
             logger.debug("Buffered Slack message from %s in %s", msg.user, msg.channel)
 
     async def _resolve_user(self, user_id: str) -> str:

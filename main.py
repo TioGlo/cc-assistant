@@ -81,12 +81,15 @@ def main() -> None:
                              task_id, result_text[:2000])
     bot.tmux.set_callback(on_code_result)
 
-    # Slack triage
+    # Slack triage. allow_commands=False: the triage output is derived from
+    # messages arbitrary Slack users wrote — an injected SCHEDULE/DELEGATE
+    # block must be stripped, never executed.
     async def on_slack_triage(prompt: str) -> None:
         result_text, _ = await bridge.send_simple(prompt)
         if "nothing notable" not in result_text.lower():
             try:
-                await bot.on_job_result("Slack digest", result_text)
+                await bot.on_job_result("Slack digest", result_text,
+                                        allow_commands=False)
             except Exception:
                 logger.exception("Delivery of Slack digest failed; preserving here:\n%s",
                                  result_text[:2000])
