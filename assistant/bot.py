@@ -90,9 +90,12 @@ class AssistantBot:
         # Agent-initiated dispatch budget (model-emitted DELEGATE blocks).
         # Bounds accidental runaway chains — a task result that re-DELEGATEs,
         # a cron loop — each dispatch is a full interactive Claude session.
-        # Owner-typed /code is exempt. In-memory; resets on restart.
-        self._dispatch_times: deque[float] = deque()
-        self._dispatch_budget_notified: float = 0.0
+        # Owner-typed /code is exempt. Separate pools so an unattended cron
+        # runaway can't starve the owner's interactive delegations (and vice
+        # versa). In-memory; resets on restart.
+        self._dispatch_times: dict[str, deque[float]] = {"chat": deque(), "job": deque()}
+        self._dispatch_budget_notified: dict[str, float] = {}
+        self._cmd_block_notified: float = 0.0
         self.app: Application | None = None
         self.voice_engine: TranscriptionEngine | None = None
         # Set later by main.py via set_discord_bot(); used to route
@@ -111,6 +114,17 @@ class AssistantBot:
     def _is_owner(self, update: Update) -> bool:
         user = update.effective_user
         return user is not None and user.id == self.config.telegram.owner_id
+
+    async def _notify_owner(self, text: str, priority: str = "action",
+                            source: str = "system") -> None:
+        """Send an internal/system notification to the owner, swallowing send
+        failures. Used inside command/delegation processing loops where a
+        Telegram outage must not abort the rest of the work."""
+        try:
+            await self._send_text(self.config.telegram.owner_id, text,
+                                  priority=priority, source=source)
+        except Exception:
+            logger.exception("Failed to send owner notification (%s)", source)
 
     async def _send_text(
         self,
@@ -403,7 +417,7 @@ class AssistantBot:
 
     async def _process_delegations_from_job(self, text: str) -> None:
         for cmd in extract_delegate_commands(text):
-            if not await self._agent_dispatch_allowed():
+            if not await self._agent_dispatch_allowed("job"):
                 continue  # budget notification already sent
             session = cmd.session or None
             task = self._enrich_with_project(cmd.task, cmd.project)
@@ -888,16 +902,21 @@ class AssistantBot:
                 # bash with no model in the loop once persisted — one injected
                 # block would be a persistent backdoor. Blocked by default;
                 # owner opts in via scheduler.allow_command_blocks.
+                # The command string itself is attacker-controlled, so it goes
+                # ONLY to the trusted journal — never interpolated into the
+                # Telegram message (markdown/injection bait) — and the page is
+                # throttled so one injected output can't become N pushes.
                 logger.warning("Blocked command-type SCHEDULE block %r: %s",
-                               cmd.name, cmd.command[:200])
-                await self._send_text(
-                    self.config.telegram.owner_id,
-                    f"Blocked a command-type SCHEDULE block `{cmd.name}`:\n"
-                    f"```\n{cmd.command[:300]}\n```\n"
-                    f"Command jobs from model output are disabled. If intended, add the "
-                    f"job to config.yaml, or set `scheduler.allow_command_blocks: true`.",
-                    priority="action", source="security",
-                )
+                               cmd.name, cmd.command[:500])
+                now = time.time()
+                if now - self._cmd_block_notified > 3600:
+                    self._cmd_block_notified = now
+                    await self._notify_owner(
+                        "Blocked a command-type scheduled job emitted by the model "
+                        "(command jobs from model output are disabled by default). "
+                        "See the service log for the command.",
+                        priority="action", source="security",
+                    )
                 continue
             try:
                 self.scheduler.add_cron_job(
@@ -920,33 +939,35 @@ class AssistantBot:
 
     MAX_AGENT_DISPATCHES_PER_HOUR = 12
 
-    async def _agent_dispatch_allowed(self) -> bool:
-        """Rolling-hour budget for model-emitted DELEGATE dispatches."""
+    async def _agent_dispatch_allowed(self, kind: str) -> bool:
+        """Rolling-hour budget for model-emitted DELEGATE dispatches. `kind`
+        is "chat" (owner-driven replies) or "job" (cron/tmux/slack results) —
+        separate pools so a runaway in one can't starve the other."""
         now = time.time()
-        while self._dispatch_times and now - self._dispatch_times[0] > 3600:
-            self._dispatch_times.popleft()
-        if len(self._dispatch_times) >= self.MAX_AGENT_DISPATCHES_PER_HOUR:
-            logger.warning("Delegation budget exhausted (%d/h); dispatch blocked",
-                           self.MAX_AGENT_DISPATCHES_PER_HOUR)
-            # Notify at most once per hour — the blocked dispatches themselves
-            # must not become a notification storm.
-            if now - self._dispatch_budget_notified > 3600:
-                self._dispatch_budget_notified = now
-                await self._send_text(
-                    self.config.telegram.owner_id,
-                    f"Delegation budget hit: more than "
+        dq = self._dispatch_times[kind]
+        while dq and now - dq[0] > 3600:
+            dq.popleft()
+        if len(dq) >= self.MAX_AGENT_DISPATCHES_PER_HOUR:
+            logger.warning("Delegation budget exhausted (%s, %d/h); dispatch blocked",
+                           kind, self.MAX_AGENT_DISPATCHES_PER_HOUR)
+            # Notify at most once per hour per pool — the blocked dispatches
+            # themselves must not become a notification storm.
+            if now - self._dispatch_budget_notified.get(kind, 0.0) > 3600:
+                self._dispatch_budget_notified[kind] = now
+                await self._notify_owner(
+                    f"Delegation budget hit ({kind}): more than "
                     f"{self.MAX_AGENT_DISPATCHES_PER_HOUR} agent-initiated dispatches "
-                    f"in an hour — possible runaway DELEGATE loop. Further dispatches "
-                    f"are blocked for now; /code still works.",
+                    f"in an hour — possible runaway DELEGATE loop. Further {kind} "
+                    f"dispatches are blocked for now; /code still works.",
                     priority="action", source="delegation_budget",
                 )
             return False
-        self._dispatch_times.append(now)
+        dq.append(now)
         return True
 
     async def _process_delegations(self, text: str, send_text) -> None:
         for cmd in extract_delegate_commands(text):
-            if not await self._agent_dispatch_allowed():
+            if not await self._agent_dispatch_allowed("chat"):
                 await send_text("Delegation blocked: hourly dispatch budget exhausted.")
                 continue
             session = cmd.session or None

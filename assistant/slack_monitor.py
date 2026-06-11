@@ -190,8 +190,11 @@ class SlackMonitor:
             self._buffer.append(msg)
             # history_limit caps the triage batch: bounds both memory and the
             # size of the prompt fed to the model. Oldest messages drop first.
-            if len(self._buffer) > self.config.history_limit:
-                del self._buffer[: -self.config.history_limit]
+            # Guard <=0 (slicing by -0 is a no-op → unbounded growth) with a
+            # hard ceiling so a misconfig can't leak memory.
+            limit = self.config.history_limit if self.config.history_limit > 0 else 500
+            if len(self._buffer) > limit:
+                self._buffer = self._buffer[-limit:]
             logger.debug("Buffered Slack message from %s in %s", msg.user, msg.channel)
 
     async def _resolve_user(self, user_id: str) -> str:

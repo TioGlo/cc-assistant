@@ -111,7 +111,10 @@ scheduler:
   # Off by default: model output is influenced by untrusted content it reads
   # (web pages, email, chat), and one injected block would be a durable
   # backdoor. Command jobs defined HERE in config.yaml are always allowed.
-  # Blocked attempts notify you with the exact command.
+  # Blocked attempts page you (the command goes to the service log, kept out
+  # of the notification since it's attacker-controlled text). Defense-in-depth
+  # on the model-output path, not a sandbox — an agent with bypassPermissions
+  # can still write scheduler-jobs.json directly.
   allow_command_blocks: false
 
   # Seed jobs — merged into scheduler-jobs.json on first run, then managed dynamically.

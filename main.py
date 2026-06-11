@@ -72,10 +72,15 @@ def main() -> None:
     # can still tag ACTION/silent_log to override). The signal file is
     # already consumed by the time this fires, so a delivery failure must
     # not propagate into the watcher — preserve the result in the journal.
+    # allow_commands=False: a delegated agent's result is a report, not an
+    # action surface. The sub-agent runs dangerously-skip-permissions and
+    # routinely ingests attacker-controllable text (web pages, issues,
+    # READMEs); its result must not be able to mint SCHEDULE/DELEGATE work
+    # back in the orchestrator's context. Same hardening as Slack triage.
     async def on_code_result(task_id: str, result_text: str) -> None:
         try:
             await bot.on_job_result(f"Code: {task_id}", result_text,
-                                    JobDelivery(priority="fyi"))
+                                    JobDelivery(priority="fyi"), allow_commands=False)
         except Exception:
             logger.exception("Delivery of task %s result failed; preserving here:\n%s",
                              task_id, result_text[:2000])
@@ -144,6 +149,12 @@ def main() -> None:
             await slack_monitor.start()
         except Exception:
             logger.exception("Slack monitor failed to start; continuing without it")
+        if config.discord.enabled and not config.discord.owner_ids:
+            logger.warning(
+                "Discord is enabled but discord.owner_ids is empty — the Discord "
+                "surface will IGNORE ALL MESSAGES (fail-secure). Add your Discord "
+                "user ID to discord.owner_ids in config.yaml to use it."
+            )
         try:
             await discord_bot.start()
         except Exception:

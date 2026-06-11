@@ -90,7 +90,7 @@ For deterministic work that needs no LLM (zero tokens), use `command:` instead o
 ```
 <!--SCHEDULE:{"name":"disk-check","command":"df -h / | tail -1","cron":"0 6 * * *"}-->
 ```
-Optional fields on command jobs: `timeout_seconds` (default 60), `silent_on_empty` (default true). Stdout flows through the priority router (silent log by default — set `delivery: { priority: ... }` to push; see Notifications & Priorities below). Errors and timeouts always escalate to a push. `/jobs` shows command jobs with a ⚙️ icon vs 🤖 for prompt jobs.
+**Command jobs you emit are rejected by default** (`scheduler.allow_command_blocks` is off) — a persisted command runs with no model in the loop, so the system won't mint one from model output unless your user opts in; a blocked attempt pages them. Put trusted command jobs in `config.yaml` instead, or ask your user to enable the flag. Prompt-type jobs (above) are always allowed. Optional fields on command jobs: `timeout_seconds` (default 60), `silent_on_empty` (default true). Stdout flows through the priority router (silent log by default — set `delivery: { priority: ... }` to push; see Notifications & Priorities below). Errors and timeouts always escalate to a push. `/jobs` shows command jobs with a ⚙️ icon vs 🤖 for prompt jobs.
 
 ### Where scheduled jobs live (and why)
 

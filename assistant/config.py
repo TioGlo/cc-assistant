@@ -150,6 +150,11 @@ class DiscordConfig:
             else:
                 coerced[str(gid)] = cfg
         self.guilds = coerced
+        # Tolerate a scalar (owner_ids: 123 or "123") as well as a list —
+        # a bare int would otherwise not iterate and a bare string would
+        # char-split into ['1','2','3'].
+        if isinstance(self.owner_ids, (str, int)):
+            self.owner_ids = [self.owner_ids]
         self.owner_ids = [str(x) for x in self.owner_ids]
 
     def is_owner(self, user_id: int | str) -> bool:
@@ -208,6 +213,18 @@ class Config:
         return self.cc_agents[0] if self.cc_agents else None
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    """Coerce a YAML scalar to bool. yaml.safe_load already turns unquoted
+    true/false into bools, but a QUOTED "false" arrives as a string, and
+    bool("false") is True — a footgun that would silently flip a security
+    default. Treat strings by content."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path)
     with path.open() as f:
@@ -222,7 +239,7 @@ def load_config(path: str | Path) -> Config:
     jobs = [ScheduledJob(**j) for j in jobs_raw]
     scheduler = SchedulerConfig(
         jobs=jobs,
-        allow_command_blocks=bool(sched_raw.pop("allow_command_blocks", False)),
+        allow_command_blocks=_as_bool(sched_raw.pop("allow_command_blocks", False)),
     )
 
     slack = SlackConfig(**raw.get("slack", {}))
