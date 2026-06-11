@@ -311,7 +311,7 @@ class AssistantBot:
         rest are held and flushed as one rolled-up message at window end."""
         window = self.config.notifications.completion_coalesce_seconds
         chat_id = self.config.telegram.owner_id
-        now = time.time()
+        now = time.monotonic()  # elapsed-interval clock — immune to NTP/suspend jumps
         # Always record for cross-session awareness (the main chat session's
         # "recent activity" prefix), whether or not we push now.
         telegram_log.append(job_name, clean_text)
@@ -336,7 +336,7 @@ class AssistantBot:
         existing = self._coalesce_flush.get(key)
         if existing and not existing.done():
             return
-        delay = max(0.0, fire_at - time.time())
+        delay = max(0.0, fire_at - time.monotonic())
         self._coalesce_flush[key] = asyncio.create_task(
             self._coalesce_flush_after(key, delay))
 
@@ -352,7 +352,7 @@ class AssistantBot:
         self._coalesce_flush.pop(key, None)
         if not buf:
             return
-        self._coalesce_last[key] = time.time()
+        self._coalesce_last[key] = time.monotonic()
         n = len(buf)
         header = f"**{n} more {key} task{'' if n == 1 else 's'} finished**"
         body = "\n".join(f"• {s}" for s in buf)
