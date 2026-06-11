@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from slack_sdk.web.async_client import AsyncWebClient
