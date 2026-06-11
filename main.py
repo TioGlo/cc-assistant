@@ -80,7 +80,8 @@ def main() -> None:
     async def on_code_result(task_id: str, result_text: str) -> None:
         try:
             await bot.on_job_result(f"Code: {task_id}", result_text,
-                                    JobDelivery(priority="fyi"), allow_commands=False)
+                                    JobDelivery(priority="fyi"), allow_commands=False,
+                                    coalesce_key="code")
         except Exception:
             logger.exception("Delivery of task %s result failed; preserving here:\n%s",
                              task_id, result_text[:2000])
@@ -165,6 +166,7 @@ def main() -> None:
             logger.exception("Voice warmup failed; lazy warmup may recover on first use")
 
     async def post_shutdown(application) -> None:
+        bot.cancel_background()
         await discord_bot.stop()
         await slack_monitor.stop()
         scheduler.stop()

@@ -182,6 +182,10 @@ class NotificationsConfig:
     digest_enabled: bool = True
     digest_cron: str = "0 8 * * *"   # quiet-hours end; fires on wake if suspended
     digest_model: str = "haiku"      # curation is routing work — cheap model
+    # Burst-y fyi completion notices (delegated tasks) are capped at one push
+    # per this window per category; the first pings in full, the rest are
+    # held and flushed as one rolled-up message at window end. 0 disables.
+    completion_coalesce_seconds: int = 1800  # 30 min
 
 
 @dataclass

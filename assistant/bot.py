@@ -96,6 +96,12 @@ class AssistantBot:
         self._dispatch_times: dict[str, deque[float]] = {"chat": deque(), "job": deque()}
         self._dispatch_budget_notified: dict[str, float] = {}
         self._cmd_block_notified: float = 0.0
+        # Completion-notification coalescing (e.g. delegated-task results):
+        # per-key last-push time, held one-line summaries, and the scheduled
+        # flush task that delivers the held batch at window end.
+        self._coalesce_last: dict[str, float] = {}
+        self._coalesce_buffer: dict[str, list[str]] = {}
+        self._coalesce_flush: dict[str, asyncio.Task] = {}
         self.app: Application | None = None
         self.voice_engine: TranscriptionEngine | None = None
         # Set later by main.py via set_discord_bot(); used to route
@@ -235,11 +241,18 @@ class AssistantBot:
         self, job_name: str, result_text: str,
         delivery: JobDelivery | None = None,
         allow_commands: bool = True,
+        coalesce_key: str | None = None,
     ) -> None:
         """allow_commands=False turns this into a pure delivery path:
         SCHEDULE/REMIND/DELEGATE blocks are stripped but never executed.
         Used for output derived from content arbitrary third parties wrote
-        (Slack triage) — that is not an action surface."""
+        (Slack triage) — that is not an action surface.
+
+        coalesce_key groups burst-y fyi notifications (e.g. delegated-task
+        completions): the first in a window pings in full, the rest are held
+        and flushed as a single rolled-up message at window end. Only applies
+        when the effective priority is fyi — action still pings immediately,
+        silent_log still goes straight to the log."""
         # Telegram priority routing. The model output may carry a
         # <!--PRIORITY:action|fyi|silent_log--> tag; otherwise the job's
         # configured default is used, falling back to silent_log.
@@ -280,12 +293,78 @@ class AssistantBot:
 
         # Default: Telegram owner
         chat_id = self.config.telegram.owner_id
+        if coalesce_key and priority == "fyi":
+            await self._coalescing_send(coalesce_key, job_name, clean_text)
+            return
         header = f"**Scheduled: {job_name}**\n\n"
         await self._send_text(
             chat_id, header + clean_text,
             priority=priority, source=f"cron:{job_name}",
         )
         telegram_log.append(job_name, clean_text)
+
+    # -- Completion-notification coalescing --
+
+    async def _coalescing_send(self, key: str, job_name: str, clean_text: str) -> None:
+        """Rate-limit burst-y fyi notifications to one push per window per
+        key, without losing any: the first in a window delivers in full; the
+        rest are held and flushed as one rolled-up message at window end."""
+        window = self.config.notifications.completion_coalesce_seconds
+        chat_id = self.config.telegram.owner_id
+        now = time.time()
+        # Always record for cross-session awareness (the main chat session's
+        # "recent activity" prefix), whether or not we push now.
+        telegram_log.append(job_name, clean_text)
+        if window <= 0 or now - self._coalesce_last.get(key, 0.0) >= window:
+            # Leading edge (or coalescing disabled): deliver in full now.
+            self._coalesce_last[key] = now
+            await self._send_text(chat_id, f"**{job_name}**\n\n{clean_text}",
+                                  priority="fyi", source=key)
+            return
+        # Inside the window: hold a one-line summary, ensure a flush is queued.
+        self._coalesce_buffer.setdefault(key, []).append(
+            self._summarize_completion(job_name, clean_text))
+        fire_at = self._coalesce_last.get(key, now) + window
+        self._ensure_coalesce_flush(key, fire_at)
+
+    @staticmethod
+    def _summarize_completion(job_name: str, text: str) -> str:
+        first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        return f"{job_name} — {first[:80]}" if first else job_name
+
+    def _ensure_coalesce_flush(self, key: str, fire_at: float) -> None:
+        existing = self._coalesce_flush.get(key)
+        if existing and not existing.done():
+            return
+        delay = max(0.0, fire_at - time.time())
+        self._coalesce_flush[key] = asyncio.create_task(
+            self._coalesce_flush_after(key, delay))
+
+    async def _coalesce_flush_after(self, key: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            await self._flush_coalesced(key)
+        except asyncio.CancelledError:
+            pass
+
+    async def _flush_coalesced(self, key: str) -> None:
+        buf = self._coalesce_buffer.pop(key, [])
+        self._coalesce_flush.pop(key, None)
+        if not buf:
+            return
+        self._coalesce_last[key] = time.time()
+        n = len(buf)
+        header = f"**{n} more {key} task{'' if n == 1 else 's'} finished**"
+        body = "\n".join(f"• {s}" for s in buf)
+        await self._send_text(self.config.telegram.owner_id, f"{header}\n{body}",
+                              priority="fyi", source=key)
+
+    def cancel_background(self) -> None:
+        """Cancel pending coalesce-flush tasks at shutdown."""
+        for task in self._coalesce_flush.values():
+            if not task.done():
+                task.cancel()
+        self._coalesce_flush.clear()
 
     # -- Silent-log digest --
 

@@ -183,6 +183,11 @@ notifications:
   digest_enabled: true
   digest_cron: "0 8 * * *"     # quiet-hours end; fires on wake if the machine was suspended
   digest_model: "haiku"        # curation is routing work — cheap model is plenty
+  # Delegated-task completions ping fyi, but they finish in bursts. Cap them
+  # at one push per window per category: the first completion pings in full,
+  # the rest are held and arrive as a single rolled-up message at window end
+  # (nothing is lost). Set 0 to ping every completion immediately.
+  completion_coalesce_seconds: 1800   # 30 minutes
 
 # Voice input (Phase 1 — transcription of Telegram voice messages).
 # Install: uv sync --extra voice    (pulls faster-whisper)
