@@ -166,7 +166,7 @@ def main() -> None:
             logger.exception("Voice warmup failed; lazy warmup may recover on first use")
 
     async def post_shutdown(application) -> None:
-        bot.cancel_background()
+        await bot.cancel_background()
         await discord_bot.stop()
         await slack_monitor.stop()
         scheduler.stop()

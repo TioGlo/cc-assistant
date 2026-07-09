@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram import Update
-from telegram.error import NetworkError as TelegramNetworkError
+from telegram.error import BadRequest, NetworkError as TelegramNetworkError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -200,6 +200,21 @@ class AssistantBot:
                     disable_notification=disable_notification,
                 )
                 return
+            except BadRequest as e:
+                # BadRequest subclasses NetworkError in python-telegram-bot, so
+                # it MUST be caught before the NetworkError branch below.
+                # Otherwise a Markdown parse rejection ("can't parse entities")
+                # is treated as a transient network error, retried 3x with the
+                # same broken markup, and re-raised on the last attempt —
+                # silently dropping the message instead of using the plain-text
+                # fallback. (This swallowed a Prana fyi message on 2026-07-07.)
+                logger.debug("Markdown send rejected (%s); falling back to plain", e)
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text=strip_markdown(chunk),
+                    disable_notification=disable_notification,
+                )
+                return
             except TelegramNetworkError:
                 if attempt == 2:
                     raise
@@ -321,9 +336,10 @@ class AssistantBot:
             await self._send_text(chat_id, f"**{job_name}**\n\n{clean_text}",
                                   priority="fyi", source=key)
             return
-        # Inside the window: hold a one-line summary, ensure a flush is queued.
-        self._coalesce_buffer.setdefault(key, []).append(
-            self._summarize_completion(job_name, clean_text))
+        # Inside the window: hold the FULL result (not a one-line summary) so
+        # the batched flush actually delivers the delegated-task result, not
+        # just its title. Ensure a flush is queued.
+        self._coalesce_buffer.setdefault(key, []).append((job_name, clean_text))
         fire_at = self._coalesce_last.get(key, now) + window
         self._ensure_coalesce_flush(key, fire_at)
 
@@ -354,13 +370,26 @@ class AssistantBot:
             return
         self._coalesce_last[key] = time.monotonic()
         n = len(buf)
-        header = f"**{n} more {key} task{'' if n == 1 else 's'} finished**"
-        body = "\n".join(f"• {s}" for s in buf)
-        await self._send_text(self.config.telegram.owner_id, f"{header}\n{body}",
+        header = f"**{n} more {key} task{'' if n == 1 else 's'} finished:**"
+        # Deliver each held result IN FULL (batched into this one push). A
+        # one-line summary here is what made delegated-task results never
+        # actually reach the owner. _send_text chunks over Telegram's limit.
+        sections = [header] + [f"**{name}**\n\n{text}" for name, text in buf]
+        await self._send_text(self.config.telegram.owner_id,
+                              "\n\n———\n\n".join(sections),
                               priority="fyi", source=key)
 
-    def cancel_background(self) -> None:
-        """Cancel pending coalesce-flush tasks at shutdown."""
+    async def cancel_background(self) -> None:
+        """At shutdown, first DELIVER any held coalesce buffers, then cancel the
+        pending flush timers. Previously this only cancelled the timers, which
+        silently dropped buffered delegated-task results whenever the service
+        restarted mid-window. Best-effort: on failure the result is still in the
+        telegram_log and recoverable via the silent-log digest."""
+        for key in list(self._coalesce_buffer.keys()):
+            try:
+                await self._flush_coalesced(key)
+            except Exception:
+                logger.exception("Shutdown flush of coalesce buffer %r failed", key)
         for task in self._coalesce_flush.values():
             if not task.done():
                 task.cancel()
