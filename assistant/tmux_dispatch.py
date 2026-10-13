@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Callable, Awaitable
@@ -351,17 +352,15 @@ class TmuxDispatch:
     def _capture_session_id(sess: TmuxSession) -> None:
         """Find the most recent Claude session ID for this agent's working directory."""
         try:
-            # Claude stores sessions under ~/.claude/projects/{path-hash}/
-            # The path hash is the working dir with / replaced by -
+            # Claude stores sessions under ~/.claude/projects/{path-key}/
+            # The path key is the absolute working dir with every non-alphanumeric
+            # char replaced by - (e.g. /home/tio/.assistant/x -> -home-tio--assistant-x)
             claude_dir = Path.home() / ".claude" / "projects"
-            if not claude_dir.exists():
+            dir_key = re.sub(r"[^a-zA-Z0-9]", "-", str(Path(sess.working_dir).expanduser().resolve()))
+            project_dir = claude_dir / dir_key
+            if not project_dir.is_dir():
+                logger.debug("No Claude project dir '%s' for agent '%s'", dir_key, sess.name)
                 return
-            # Find the project dir matching the agent's working directory
-            dir_key = str(sess.working_dir).replace("/", "-").lstrip("-")
-            matching = [d for d in claude_dir.iterdir() if d.is_dir() and dir_key in d.name]
-            if not matching:
-                return
-            project_dir = matching[0]
             # Find the most recent .jsonl session file
             sessions = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
             if not sessions:
