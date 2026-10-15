@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import time
 from pathlib import Path
 from typing import Callable, Awaitable
@@ -16,6 +17,19 @@ DispatchCallback = Callable[[str, str], Awaitable[None]]
 
 class TmuxDispatchError(Exception):
     pass
+
+
+def permission_flag(mode: str) -> str:
+    """Map a configured permission_mode to the claude CLI flag.
+
+    Accepts Claude Code mode names ("auto", "bypassPermissions", "acceptEdits", ...)
+    passed via --permission-mode. The legacy flag-style value
+    "dangerously-skip-permissions" is kept for existing configs.
+    """
+    mode = mode.strip().removeprefix("--")
+    if mode == "dangerously-skip-permissions":
+        return "--dangerously-skip-permissions"
+    return f"--permission-mode {shlex.quote(mode)}"
 
 
 class TmuxSession:
@@ -73,7 +87,7 @@ class TmuxSession:
             raise TmuxDispatchError(f"Failed to create tmux session: {stderr}")
         await asyncio.sleep(1)
         # Build claude command with --resume if enabled and we have a prior session
-        claude_cmd = f"claude --{self.permission_mode}"
+        claude_cmd = f"claude {permission_flag(self.permission_mode)}"
         if self.model:
             claude_cmd += f" --model {self.model}"
         if self.resume:

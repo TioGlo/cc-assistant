@@ -92,7 +92,7 @@ cc_agents:
   - name: "{{AGENT_NAME}}-workspace"
     tmux_session: "{{AGENT_NAME}}-workspace"
     working_dir: "{{AGENT_ROOT}}/workspace"
-    # permission_mode: "dangerously-skip-permissions"  # default
+    # permission_mode: "auto"  # default; any Claude Code mode (bypassPermissions, acceptEdits, ...) or legacy "dangerously-skip-permissions"
     # resume: true          # resume prior Claude session on tmux recreation (default: true)
     # model: "sonnet"       # passed as `claude --model <model>`; empty = inherit Claude Code default
   # Additional agents (add as needed):

@@ -30,7 +30,7 @@ class CCAgent:
     name: str
     tmux_session: str = ""  # defaults to name if empty
     working_dir: str = ""   # defaults to {AGENT_ROOT}/coding if empty
-    permission_mode: str = "dangerously-skip-permissions"
+    permission_mode: str = "auto"  # Claude Code mode name, or legacy "dangerously-skip-permissions"
     resume: bool = True     # resume prior Claude session on tmux recreation
     model: str = ""         # passed as `claude --model <model>`; empty = inherit Claude Code's default
 

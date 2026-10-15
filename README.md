@@ -183,7 +183,7 @@ cc_agents:
   - name: "my-code"
     tmux_session: "my-code"
     # working_dir: ""              # defaults to {AGENT_ROOT}/coding
-    # permission_mode: "dangerously-skip-permissions"
+    # permission_mode: "auto"     # default; any Claude Code mode, or legacy "dangerously-skip-permissions"
 
 # Scheduled jobs (use `cron` OR `interval`, not both)
 scheduler:
