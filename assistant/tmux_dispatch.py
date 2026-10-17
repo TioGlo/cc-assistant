@@ -117,10 +117,41 @@ class TmuxSession:
         await asyncio.sleep(1.0)
         # Step 3: Press Enter to submit
         await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter")
-        # Step 4: Extra Enter after a pause — Claude Code's TUI sometimes needs
-        # a second Enter to actually begin processing (confirmation prompt)
+        # Step 4: Enter C-m in a separate send-keys after a pause — Claude Code's
+        # TUI sometimes needs it to actually begin processing
         await asyncio.sleep(0.5)
-        await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter")
+        await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter", "C-m")
+        # Step 5: Verify it started. Twice (2026-10-16, 10-17) a prompt sat unsent
+        # in the input box after steps 3-4, and nothing noticed.
+        await self._confirm_submitted(message)
+
+    async def _confirm_submitted(self, message: str, attempts: int = 3) -> None:
+        """Wait for Claude Code's working signal; re-press Enter C-m while the prompt is still typed."""
+        # The input box wraps long prompts, so match only the start of the first line.
+        probe = message.strip().splitlines()[0][:30] if message.strip() else ""
+        pane = ""
+        for attempt in range(1, attempts + 1):
+            for _ in range(6):
+                await asyncio.sleep(1)
+                rc, pane, _ = await self._run(
+                    "tmux", "capture-pane", "-t", self.tmux_session, "-p", "-e", "-S", "-15",
+                )
+                if rc == 0 and "esc to interrupt" in pane:
+                    return
+            # Only re-press if our text is still typed in the input box (between the
+            # last two horizontal rules; scrollback also shows submitted prompts).
+            # On an empty prompt Claude Code shows a dimmed suggestion (ESC[2m) that
+            # Enter would send.
+            lines = pane.splitlines()
+            rules = [i for i, l in enumerate(lines) if re.sub(r"\x1b\[[0-9;]*m", "", l).strip().startswith("──")]
+            box = lines[rules[-2] + 1:rules[-1]] if len(rules) >= 2 else []
+            typed = bool(probe) and any(probe in line and "\x1b[2m" not in line for line in box)
+            if not typed:
+                logger.info("No working signal in '%s', but the prompt isn't in the input box; assuming it ran", self.tmux_session)
+                return
+            logger.warning("Prompt not submitted in '%s'; pressing Enter C-m again (attempt %d)", self.tmux_session, attempt)
+            await self._run("tmux", "send-keys", "-t", self.tmux_session, "Enter", "C-m")
+        logger.error("Prompt still not submitted in '%s' after %d retries", self.tmux_session, attempts)
 
     async def capture_recent_output(self, lines: int = 50) -> str:
         rc, stdout, _ = await self._run(
